@@ -673,7 +673,7 @@ async def test_response_create_gate_timeout_retires_old_pending_without_upstream
 
 
 @pytest.mark.asyncio
-async def test_response_create_gate_timeout_retires_closed_anchored_pending_without_upstream_event(
+async def test_response_create_gate_timeout_retires_live_anchored_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _make_app_settings(
@@ -683,7 +683,6 @@ async def test_response_create_gate_timeout_retires_closed_anchored_pending_with
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     session = _make_bridge_session()
-    session.closed = True
     service._http_bridge_sessions[session.key] = session
     await session.response_create_gate.acquire()
     old_pending = proxy_service._WebSocketRequestState(
@@ -966,7 +965,7 @@ def test_http_bridge_pending_state_with_first_event_latency_only_is_stale() -> N
         (None, "turn-anchored", True),
     ],
 )
-def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
+def test_http_bridge_pending_state_with_continuity_anchor_is_stale(
     previous_response_id: str | None,
     session_id: str | None,
     hard_continuity_anchor: bool,
@@ -991,44 +990,6 @@ def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
             request_state,
             now=time.monotonic(),
             threshold_seconds=300.0,
-        )
-        is False
-    )
-
-
-@pytest.mark.parametrize(
-    ("previous_response_id", "session_id", "hard_continuity_anchor"),
-    [
-        ("resp-closed-anchored", None, False),
-        (None, "turn-closed-anchored", True),
-    ],
-)
-def test_http_bridge_closed_session_pending_anchor_is_stale(
-    previous_response_id: str | None,
-    session_id: str | None,
-    hard_continuity_anchor: bool,
-) -> None:
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req-closed-anchored-pending",
-        model="gpt-5.2",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic() - 301.0,
-        transport="http",
-        response_create_gate_acquired=True,
-        awaiting_response_created=True,
-        previous_response_id=previous_response_id,
-        session_id=session_id,
-        hard_continuity_anchor=hard_continuity_anchor,
-    )
-
-    assert (
-        http_bridge_helpers_module._http_bridge_pending_state_is_stale(
-            request_state,
-            now=time.monotonic(),
-            threshold_seconds=300.0,
-            session_closed=True,
         )
         is True
     )

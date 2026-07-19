@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
@@ -18,7 +19,7 @@ from app.db.models import (
     StickySessionKind,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, durable_bridge_hash
 
 pytestmark = pytest.mark.unit
 
@@ -121,6 +122,7 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 @pytest.mark.asyncio
 async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_aliases(
     coordinator: DurableBridgeSessionCoordinator,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     turn_owner = await coordinator.claim_live_session(
         session_key_kind="session_header",
@@ -165,17 +167,103 @@ async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_alias
         lease_ttl_seconds=120.0,
     )
 
-    with pytest.raises(ProxyResponseError) as exc_info:
-        await coordinator.lookup_request_targets(
-            session_key_kind="request",
-            session_key_value="req-conflicting-owner",
-            api_key_id="key-conflict",
-            turn_state="http_turn_conflicting_owner",
-            session_header=None,
-            previous_response_id="resp_conflicting_owner",
-        )
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.durable_bridge_coordinator"):
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await coordinator.lookup_request_targets(
+                session_key_kind="request",
+                session_key_value="req-conflicting-owner",
+                api_key_id="key-conflict",
+                turn_state="http_turn_conflicting_owner",
+                session_header=None,
+                previous_response_id="resp_conflicting_owner",
+            )
 
     assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert "durable_bridge_continuity_owner_conflict" in caplog.text
+    assert "http_turn_conflicting_owner" not in caplog.text
+    assert "resp_conflicting_owner" not in caplog.text
+    assert durable_bridge_hash("http_turn_conflicting_owner")[:12] in caplog.text
+    assert durable_bridge_hash("resp_conflicting_owner")[:12] in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hard_alias_kind", ["turn_state", "previous_response_id"])
+async def test_durable_bridge_hard_alias_ignores_broader_session_header(
+    coordinator: DurableBridgeSessionCoordinator,
+    caplog: pytest.LogCaptureFixture,
+    hard_alias_kind: str,
+) -> None:
+    hard_value = f"hard-{hard_alias_kind}"
+    session_header = f"parent-session-{hard_alias_kind}"
+    hard_owner = await coordinator.claim_live_session(
+        session_key_kind="turn_state_header",
+        session_key_value=f"fork-lane-{hard_alias_kind}",
+        api_key_id="key-fork",
+        instance_id="instance-fork",
+        lease_ttl_seconds=120.0,
+        account_id="acc-fork",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    parent_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value=session_header,
+        api_key_id="key-fork",
+        instance_id="instance-parent",
+        lease_ttl_seconds=120.0,
+        account_id="acc-parent",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=parent_owner.session_id,
+        api_key_id="key-fork",
+        session_header=session_header,
+    )
+    if hard_alias_kind == "turn_state":
+        registered = await coordinator.register_turn_state(
+            session_id=hard_owner.session_id,
+            api_key_id="key-fork",
+            instance_id="instance-fork",
+            owner_epoch=hard_owner.owner_epoch,
+            turn_state=hard_value,
+            lease_ttl_seconds=120.0,
+        )
+    else:
+        registered = await coordinator.register_previous_response_id(
+            session_id=hard_owner.session_id,
+            api_key_id="key-fork",
+            instance_id="instance-fork",
+            owner_epoch=hard_owner.owner_epoch,
+            response_id=hard_value,
+            lease_ttl_seconds=120.0,
+        )
+    assert registered is True
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.durable_bridge_coordinator"):
+        lookup = await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="fork-request",
+            api_key_id="key-fork",
+            turn_state=hard_value if hard_alias_kind == "turn_state" else None,
+            session_header=session_header,
+            previous_response_id=hard_value if hard_alias_kind == "previous_response_id" else None,
+        )
+
+    assert lookup is not None
+    assert lookup.session_id == hard_owner.session_id
+    assert lookup.account_id == "acc-fork"
+    assert "durable_bridge_session_fallback_ignored" in caplog.text
+    assert hard_value not in caplog.text
+    assert session_header not in caplog.text
+    assert durable_bridge_hash(hard_value)[:12] in caplog.text
+    assert durable_bridge_hash(session_header)[:12] in caplog.text
 
 
 @pytest.mark.asyncio

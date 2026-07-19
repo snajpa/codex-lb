@@ -1330,7 +1330,6 @@ class ProxyService(
                         state,
                         now=now,
                         threshold_seconds=threshold_seconds,
-                        session_closed=bridge_session.closed,
                     )
                     for state in stale_candidate_states
                 )

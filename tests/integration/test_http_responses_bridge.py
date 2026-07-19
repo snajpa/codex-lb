@@ -5472,6 +5472,195 @@ async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_prese
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_fork_turn_alias_overrides_parent_session_alias(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    parent_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_parent_alias",
+        "backend-http-bridge-parent-alias@example.com",
+    )
+    fork_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_fork_alias",
+        "backend-http-bridge-fork-alias@example.com",
+    )
+    parent_account = await _get_account(parent_account_id)
+    fork_account = await _get_account(fork_account_id)
+    service = get_proxy_service_for_app(app_instance)
+    parent_session_header = "shared-parent-codex-session"
+    fork_turn_state = "fork-specific-turn-state"
+
+    parent_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value=parent_session_header,
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id=parent_account.id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await service._durable_bridge.register_session_header(
+        session_id=parent_lookup.session_id,
+        api_key_id=None,
+        session_header=parent_session_header,
+    )
+    fork_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="internal_unanchored_parallel",
+        session_key_value="fork-specific-durable-lane",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id=fork_account.id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert await service._durable_bridge.register_turn_state(
+        session_id=fork_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=fork_lookup.owner_epoch,
+        turn_state=fork_turn_state,
+        lease_ttl_seconds=120.0,
+    )
+
+    selection = AsyncMock(return_value=AccountSelection(account=fork_account, error_message=None, error_code=None))
+    monkeypatch.setattr(service, "_select_account_with_budget", selection)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=fork_account))
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        assert account_id_header == fork_account.chatgpt_account_id
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.6-sol",
+            "instructions": "Return exactly OK.",
+            "input": "continue the fork",
+            "prompt_cache_key": "fork-specific-prompt-cache",
+            "stream": True,
+        },
+        headers={
+            "session_id": parent_session_header,
+            "x-codex-turn-state": fork_turn_state,
+            "user-agent": "codex_cli_rs/0.145.0",
+        },
+    )
+
+    _assert_created_text_delta_completed(events)
+    selection.assert_awaited()
+    assert selection.await_args.kwargs["preferred_account_id"] == fork_account.id
+    assert len(fake_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_rejects_conflicting_hard_durable_aliases(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    turn_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_turn_conflict",
+        "backend-http-bridge-turn-conflict@example.com",
+    )
+    response_account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_response_conflict",
+        "backend-http-bridge-response-conflict@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    turn_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="turn_state_header",
+        session_key_value="hard-turn-conflict-lane",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id=turn_account_id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    response_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="hard-response-conflict-lane",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id=response_account_id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert await service._durable_bridge.register_turn_state(
+        session_id=turn_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=turn_lookup.owner_epoch,
+        turn_state="hard-turn-conflict-alias",
+        lease_ttl_seconds=120.0,
+    )
+    assert await service._durable_bridge.register_previous_response_id(
+        session_id=response_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=response_lookup.owner_epoch,
+        response_id="hard-response-conflict-alias",
+        lease_ttl_seconds=120.0,
+    )
+    selection = AsyncMock(side_effect=AssertionError("conflicting hard aliases must fail before selection"))
+    monkeypatch.setattr(service, "_select_account_with_budget", selection)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "Return exactly OK.",
+            "input": "conflicting continuation",
+            "previous_response_id": "hard-response-conflict-alias",
+            "stream": True,
+        },
+        headers={
+            "session_id": "shared-hard-conflict-parent",
+            "x-codex-turn-state": "hard-turn-conflict-alias",
+            "user-agent": "codex_cli_rs/0.145.0",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "continuity_owner_conflict"
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_prefers_codex_session_header_over_prompt_cache_key(
     async_client,
     monkeypatch,
@@ -8008,7 +8197,7 @@ async def test_http_bridge_stale_gate_retires_after_leading_rate_limit_telemetry
 
 
 @pytest.mark.asyncio
-async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_retry(
+async def test_codex_responses_http_bridge_replaces_anchored_retired_gate_without_client_retry(
     async_client,
     app_instance,
     monkeypatch,
@@ -8078,6 +8267,8 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
         api_key_reservation=None,
         started_at=time.monotonic() - 1.0,
         transport="http",
+        previous_response_id="resp-stale-anchored-gate-owner",
+        hard_continuity_anchor=True,
         response_create_gate=gate,
         response_create_gate_acquired=True,
         awaiting_response_created=True,

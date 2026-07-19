@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,7 +17,10 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRetryCircuitSnapshot,
     DurableBridgeSessionSnapshot,
     durable_bridge_api_key_scope,
+    durable_bridge_hash,
 )
+
+logger = logging.getLogger(__name__)
 
 _DURABLE_TURN_STATE_ALIAS = "turn_state"
 _DURABLE_PREVIOUS_RESPONSE_ALIAS = "previous_response_id"
@@ -65,7 +69,7 @@ class DurableBridgeSessionCoordinator:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
-            resolved_snapshots: list[DurableBridgeSessionSnapshot] = []
+            resolved_snapshots: dict[str, DurableBridgeSessionSnapshot] = {}
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
@@ -79,12 +83,21 @@ class DurableBridgeSessionCoordinator:
                     api_key_scope=api_key_scope,
                 )
                 if snapshot is not None:
-                    resolved_snapshots.append(snapshot)
-            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
-            if len(resolved_identities) > 1:
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
+                    resolved_snapshots[alias_kind] = snapshot
+
+            turn_snapshot = resolved_snapshots.get(_DURABLE_TURN_STATE_ALIAS)
+            response_snapshot = resolved_snapshots.get(_DURABLE_PREVIOUS_RESPONSE_ALIAS)
+            if (
+                turn_snapshot is not None
+                and response_snapshot is not None
+                and _durable_snapshot_identity(turn_snapshot) != _durable_snapshot_identity(response_snapshot)
+            ):
+                _log_hard_alias_conflict(
+                    turn_state=turn_state,
+                    previous_response_id=previous_response_id,
+                    turn_snapshot=turn_snapshot,
+                    response_snapshot=response_snapshot,
+                )
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -93,8 +106,27 @@ class DurableBridgeSessionCoordinator:
                         error_type="server_error",
                     ),
                 )
-            if resolved_snapshots:
-                return _to_lookup(resolved_snapshots[0])
+
+            hard_snapshot = turn_snapshot or response_snapshot
+            if hard_snapshot is not None:
+                session_snapshot = resolved_snapshots.get(_DURABLE_SESSION_HEADER_ALIAS)
+                if session_snapshot is not None and _durable_snapshot_identity(
+                    session_snapshot
+                ) != _durable_snapshot_identity(hard_snapshot):
+                    _log_session_fallback_ignored(
+                        hard_alias_kind=(
+                            _DURABLE_TURN_STATE_ALIAS if turn_snapshot is not None else _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                        ),
+                        hard_alias_value=turn_state if turn_snapshot is not None else previous_response_id,
+                        session_header=session_header,
+                        hard_snapshot=hard_snapshot,
+                        session_snapshot=session_snapshot,
+                    )
+                return _to_lookup(hard_snapshot)
+
+            session_snapshot = resolved_snapshots.get(_DURABLE_SESSION_HEADER_ALIAS)
+            if session_snapshot is not None:
+                return _to_lookup(session_snapshot)
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
@@ -387,4 +419,58 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+    )
+
+
+def _durable_snapshot_identity(snapshot: DurableBridgeSessionSnapshot) -> tuple[str, str | None]:
+    return snapshot.id, snapshot.account_id
+
+
+def _hashed_identifier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return f"sha256:{durable_bridge_hash(value)[:12]}"
+
+
+def _log_hard_alias_conflict(
+    *,
+    turn_state: str | None,
+    previous_response_id: str | None,
+    turn_snapshot: DurableBridgeSessionSnapshot,
+    response_snapshot: DurableBridgeSessionSnapshot,
+) -> None:
+    logger.warning(
+        "durable_bridge_continuity_owner_conflict "
+        "turn_state_hash=%s previous_response_id_hash=%s "
+        "turn_session_hash=%s response_session_hash=%s "
+        "turn_account_hash=%s response_account_hash=%s",
+        _hashed_identifier(turn_state),
+        _hashed_identifier(previous_response_id),
+        _hashed_identifier(turn_snapshot.id),
+        _hashed_identifier(response_snapshot.id),
+        _hashed_identifier(turn_snapshot.account_id),
+        _hashed_identifier(response_snapshot.account_id),
+    )
+
+
+def _log_session_fallback_ignored(
+    *,
+    hard_alias_kind: str,
+    hard_alias_value: str | None,
+    session_header: str | None,
+    hard_snapshot: DurableBridgeSessionSnapshot,
+    session_snapshot: DurableBridgeSessionSnapshot,
+) -> None:
+    logger.info(
+        "durable_bridge_session_fallback_ignored "
+        "hard_alias_kind=%s hard_alias_hash=%s session_header_hash=%s "
+        "hard_session_hash=%s fallback_session_hash=%s "
+        "hard_account_hash=%s fallback_account_hash=%s",
+        hard_alias_kind,
+        _hashed_identifier(hard_alias_value),
+        _hashed_identifier(session_header),
+        _hashed_identifier(hard_snapshot.id),
+        _hashed_identifier(session_snapshot.id),
+        _hashed_identifier(hard_snapshot.account_id),
+        _hashed_identifier(session_snapshot.account_id),
     )

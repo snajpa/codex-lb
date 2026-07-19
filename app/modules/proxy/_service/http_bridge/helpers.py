@@ -617,14 +617,9 @@ def _http_bridge_pending_state_is_stale(
     *,
     now: float,
     threshold_seconds: float,
-    session_closed: bool = False,
 ) -> bool:
     """Identify pre-created bridge requests that never received upstream activity."""
     if request_state.transport != _REQUEST_TRANSPORT_HTTP or request_state.skip_request_log:
-        return False
-    # Previous-response and turn-state identifiers preserve hard continuity
-    # while the socket is live. Once it closes, that continuity is already lost.
-    if not session_closed and (request_state.previous_response_id is not None or request_state.hard_continuity_anchor):
         return False
     if not request_state.response_create_gate_acquired or not request_state.awaiting_response_created:
         return False
