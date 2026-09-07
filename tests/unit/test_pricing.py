@@ -452,3 +452,31 @@ def test_calculate_costs_uses_service_tier():
     result = calculate_costs(items, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
 
     assert result.total_usd_7d == pytest.approx(35.0)
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-astra-2026-09-01"])
+@pytest.mark.parametrize(
+    ("input_tokens", "cached_tokens", "tier", "expected"),
+    [
+        (100_000, 80_000, None, 0.33),
+        (100_000, 80_000, "default", 0.33),
+        (100_000, 80_000, "flex", 0.165),
+        (100_000, 80_000, "priority", 0.66),
+        (100_000, 80_000, "fast", 0.66),
+        (272_000, 200_000, "default", 0.97),
+        (300_000, 200_000, "default", 2.475),
+        (300_000, 200_000, "flex", 1.2375),
+        (300_000, 200_000, "priority", 4.95),
+        (300_000, 200_000, "fast", 4.95),
+    ],
+)
+def test_astra_costs(model, input_tokens, cached_tokens, tier, expected):
+    resolved = get_pricing_for_model(model)
+    assert resolved is not None
+    _, price = resolved
+    usage = UsageTokens(input_tokens=input_tokens, output_tokens=1000, cached_input_tokens=cached_tokens)
+    assert calculate_cost_from_usage(usage, price, service_tier=tier) == pytest.approx(expected)
+
+
+def test_astra_unknown_variant_is_not_priced():
+    assert get_pricing_for_model("gpt-6-astra-pro") is None

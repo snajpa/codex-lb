@@ -37,3 +37,12 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Astra cost estimates (2026-09-07)
+
+Rates are sourced from https://developers.openai.com/api/docs/models/gpt-6-astra
+and https://developers.openai.com/api/docs/pricing . Historical request logs
+record input/cache/output tokens, but no cache-write count. Their estimates
+therefore omit the separately unrecorded cache-write premium. They do not
+measure ChatGPT subscription credits. A 100k-input, 80k-cached, 1k-output
+Standard request estimates to $0.33.
