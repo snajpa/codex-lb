@@ -405,6 +405,7 @@ class Settings(BaseSettings):
     proxy_response_create_limit: int = Field(default=256, ge=0)
     proxy_compact_response_create_limit: int = Field(default=64, ge=0)
     proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
+    proxy_session_input_token_rate_per_minute: int = Field(default=0, ge=0)
     proxy_account_response_create_limit: int = Field(default=4, ge=0)
     proxy_account_stream_limit: int = Field(default=8, ge=0)
     proxy_account_stream_recovery_reserve: int = Field(default=1, ge=0)

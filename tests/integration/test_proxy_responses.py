@@ -176,6 +176,51 @@ async def test_proxy_responses_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_session_input_token_rate_stops_the_next_same_session_before_upstream(
+    async_client, monkeypatch
+):
+    raw_account_id = "acc_session_input_token_rate"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, "session-input-token-rate@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert response.status_code == 200
+
+    settings = proxy_module.get_settings()
+    settings.proxy_session_input_token_rate_per_minute = 400_000
+    upstream_calls = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        nonlocal upstream_calls
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        upstream_calls += 1
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_session_input_token_rate",'
+            '"object":"response","status":"completed","output":[],"usage":'
+            '{"input_tokens":400000,"output_tokens":1,"total_tokens":400001}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    request = {"model": "gpt-5.6-sol", "input": "hello", "stream": False}
+    headers = {"x-codex-session-id": "session-input-token-rate"}
+
+    response = await async_client.post("/v1/responses", json=request, headers=headers)
+    assert response.status_code == 200
+
+    response = await async_client.post("/v1/responses", json=request, headers=headers)
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "5"
+    assert response.json()["error"]["code"] == "session_token_rate_limited"
+    assert upstream_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_prohibits_fast_model_alias_priority_tier(async_client, monkeypatch):
     raw_account_id = "acc_prohibit_fast_mode"
     auth_json = _make_auth_json(raw_account_id, "prohibit-fast-mode@example.com")

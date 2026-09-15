@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 from app.core.clients.proxy import ProxyResponseError
@@ -51,6 +52,11 @@ class _AdmissionGate:
     wait_timeout_seconds: float
 
 
+@dataclass(slots=True)
+class _SessionTokenRateState:
+    next_admission_at: float
+
+
 class WorkAdmissionController:
     def __init__(
         self,
@@ -60,11 +66,15 @@ class WorkAdmissionController:
         response_create_limit: int,
         compact_response_create_limit: int,
         admission_wait_timeout_seconds: float = _DEFAULT_ADMISSION_WAIT_TIMEOUT_SECONDS,
+        session_input_token_rate_per_minute: int = 0,
     ) -> None:
         self._token_refresh = _make_gate(token_refresh_limit, admission_wait_timeout_seconds)
         self._websocket_connect = _make_gate(websocket_connect_limit, admission_wait_timeout_seconds)
         self._response_create = _make_gate(response_create_limit, admission_wait_timeout_seconds)
         self._compact_response_create = _make_gate(compact_response_create_limit, admission_wait_timeout_seconds)
+        self._session_input_token_rate_per_minute = session_input_token_rate_per_minute
+        self._session_token_rate_states: dict[str, _SessionTokenRateState] = {}
+        self._next_session_token_rate_expiry = 0.0
 
     async def acquire_token_refresh(self) -> AdmissionLease:
         return await self._acquire(self._token_refresh, stage="token_refresh")
@@ -76,6 +86,48 @@ class WorkAdmissionController:
         semaphore = self._compact_response_create if compact else self._response_create
         stage = "compact_response_create" if compact else "response_create"
         return await self._acquire(semaphore, stage=stage)
+
+    def enforce_session_input_token_rate(self, session_id: str | None) -> None:
+        if self._session_input_token_rate_per_minute <= 0:
+            return
+        now = time.monotonic()
+        self._purge_expired_session_token_rates(now)
+        if not session_id:
+            return
+        if session_id not in self._session_token_rate_states:
+            return
+        raise ProxyResponseError(
+            429,
+            local_overload_error(
+                "codex-lb is temporarily rate limited for this session",
+                code="session_token_rate_limited",
+            ),
+        )
+
+    def record_session_input_tokens(self, session_id: str | None, input_tokens: int | None) -> None:
+        if self._session_input_token_rate_per_minute <= 0 or not session_id or not input_tokens or input_tokens < 0:
+            return
+        now = time.monotonic()
+        self._purge_expired_session_token_rates(now)
+        next_admission_at = now + 60.0 * input_tokens / self._session_input_token_rate_per_minute
+        state = self._session_token_rate_states.get(session_id)
+        if state is None:
+            self._session_token_rate_states[session_id] = _SessionTokenRateState(next_admission_at)
+        else:
+            state.next_admission_at = max(state.next_admission_at, next_admission_at)
+        if not self._next_session_token_rate_expiry or next_admission_at < self._next_session_token_rate_expiry:
+            self._next_session_token_rate_expiry = next_admission_at
+
+    def _purge_expired_session_token_rates(self, now: float) -> None:
+        if now < self._next_session_token_rate_expiry:
+            return
+        next_expiry = 0.0
+        for session_id, state in list(self._session_token_rate_states.items()):
+            if state.next_admission_at <= now:
+                del self._session_token_rate_states[session_id]
+            elif not next_expiry or state.next_admission_at < next_expiry:
+                next_expiry = state.next_admission_at
+        self._next_session_token_rate_expiry = next_expiry
 
     async def _acquire(self, gate: _AdmissionGate | None, *, stage: str) -> AdmissionLease:
         if gate is None:

@@ -535,6 +535,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 )
             )
         try:
+            proxy._get_work_admission().enforce_session_input_token_rate(session_id)
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
             account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
                 account_id=account.id,
@@ -1049,6 +1050,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.cached_input_tokens = cached_input_tokens
             settlement.error_code = error_code
             settlement.error_message = error_message
+            if status == "success":
+                proxy._get_work_admission().record_session_input_tokens(session_id, input_tokens)
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
