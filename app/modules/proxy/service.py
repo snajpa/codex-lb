@@ -973,6 +973,7 @@ class ProxyService(
                     "proxy_admission_wait_timeout_seconds",
                     10.0,
                 ),
+                session_input_token_rate_per_minute=settings.proxy_session_input_token_rate_per_minute,
             )
         return self._work_admission
 
