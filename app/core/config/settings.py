@@ -326,7 +326,11 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
-    compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    # Compaction of large threads routinely takes 1–3 minutes upstream with a
+    # long tail past the old 180 s cap; cutting it at ~150 s surfaced a 502 and
+    # the client retry restarted the whole slow compaction (livelock). The
+    # stream budget above defaults to 7200 s, so the compact cap is the outlier.
+    compact_request_budget_seconds: float = Field(default=420.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
     stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
