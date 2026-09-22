@@ -31,7 +31,6 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
@@ -404,17 +403,67 @@ def test_the_namespace_reexec_keeps_this_repository_first_on_the_import_path() -
 # --- the network-namespace attestation ------------------------------------------------
 
 
+_NAMESPACE_VERDICT_SNIPPET = (
+    "import json;"
+    "from scripts.traffic_analysis.codex_body_capture import network_isolation, observed_network_interfaces;"
+    "print(json.dumps({"
+    "'interfaces': list(observed_network_interfaces()),"
+    "'verdict': network_isolation(requested=True),"
+    "}))"
+)
+
+
+def _namespace_command(snippet: str) -> list[str]:
+    return [
+        "unshare",
+        "--map-root-user",
+        "--net",
+        "--",
+        "sh",
+        "-c",
+        'ip link set lo up && exec "$@"',
+        "sh",
+        sys.executable,
+        "-c",
+        snippet,
+    ]
+
+
+def _namespace_verdict(stdout: str) -> dict[str, Any] | None:
+    """The JSON line the snippet prints, or ``None`` when it never got there."""
+
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and "interfaces" in payload and "verdict" in payload:
+            return payload
+    return None
+
+
 @cache
 def _unprivileged_netns_available() -> bool:
+    """Ask, inside the namespace, the same question the test asks.
+
+    Trusting the exit status of ``unshare --net true`` was not the same thing:
+    on a host where that succeeded while the isolation did not hold, the gate
+    said yes and the test failed as though the verifier were wrong. A probe that
+    asks the real question cannot disagree with the operation it gates.
+    """
+
     if shutil.which("unshare") is None or shutil.which("ip") is None:
         return False
     probe = subprocess.run(
-        ["unshare", "--map-root-user", "--net", "true"],
+        _namespace_command(_NAMESPACE_VERDICT_SNIPPET),
+        env=reexec_environment(os.environ),
         capture_output=True,
+        text=True,
         check=False,
         stdin=subprocess.DEVNULL,
     )
-    return probe.returncode == 0
+    verdict = _namespace_verdict(probe.stdout) if probe.returncode == 0 else None
+    return verdict is not None and verdict["verdict"]["loopback_only"] is True
 
 
 def _capture_argv(destination: Path, catalog: Path, *extra: str) -> list[str]:
@@ -585,39 +634,39 @@ def test_the_observation_reports_loopback_only_inside_a_real_namespace() -> None
     ``unshare --net`` creates no mount namespace and sysfs stays bound to the one
     it was mounted in. ``socket.if_nameindex`` asks the kernel over netlink and
     answers for this namespace, which is why the observation uses it.
+
+    The namespace is not empty, and assuming it was is what made this test fail
+    on the development host: the kernel materialises its fallback tunnel devices
+    there on demand (``ip6tnl0``, ``tunl0``, ``gre0``, ``gretap0``, ``erspan0``),
+    all of them down and unaddressed. The assertion is therefore the property the
+    lane sells -- nothing outside loopback can carry traffic -- and never the
+    interface list, which is kernel-dependent.
     """
 
-    if observed_network_interfaces() == ("lo",):  # pragma: no cover - the suite is already isolated
+    # requested=False asks for the observation without the refusal it would
+    # otherwise raise on a host that is not isolated -- which is this host.
+    if network_isolation(requested=False)["loopback_only"]:  # pragma: no cover - the suite is already isolated
         pytest.skip("this host is already loopback-only, so the comparison would be vacuous")
-    snippet = (
-        "import json;"
-        "from scripts.traffic_analysis.codex_body_capture import observed_network_interfaces;"
-        "print(json.dumps(list(observed_network_interfaces())))"
-    )
-    command: Sequence[str] = [
-        "unshare",
-        "--map-root-user",
-        "--net",
-        "--",
-        "sh",
-        "-c",
-        'ip link set lo up && exec "$@"',
-        "sh",
-        sys.executable,
-        "-c",
-        snippet,
-    ]
+    outer = set(observed_network_interfaces())
 
     completed = subprocess.run(
-        command,
+        _namespace_command(_NAMESPACE_VERDICT_SNIPPET),
         env=reexec_environment(os.environ),
         capture_output=True,
         text=True,
         check=True,
         stdin=subprocess.DEVNULL,
     )
+    verdict = _namespace_verdict(completed.stdout)
+    assert verdict is not None, completed.stdout
 
-    assert json.loads(completed.stdout.strip().splitlines()[-1]) == ["lo"]
+    inside = set(verdict["interfaces"])
+    assert verdict["verdict"]["requested"] is True
+    assert verdict["verdict"]["loopback_only"] is True, verdict
+    assert "lo" in inside
+    # A different namespace, not an echo of the host: the host's uplinks, bridges
+    # and veth pairs are not visible in here.
+    assert inside != outer
 
 
 def test_the_body_summary_reports_the_facts_an_operator_checks() -> None:

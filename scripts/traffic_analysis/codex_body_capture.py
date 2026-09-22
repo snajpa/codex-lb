@@ -114,6 +114,13 @@ PROVIDER_NAME = "capture-origin"
 REEXEC_FLAG = "--already-in-network-namespace"
 # Loopback under either spelling the platforms use.
 LOOPBACK_INTERFACE_NAMES: frozenset[str] = frozenset({"lo", "lo0"})
+# Devices the kernel materialises in *every* network namespace on demand. They
+# are down and unaddressed, so an unaddressed one of these carries no egress --
+# while an unaddressed interface with any other name is treated as routable,
+# because it can still be brought up.
+FALLBACK_TUNNEL_INTERFACE_NAMES: frozenset[str] = frozenset(
+    {"ip6tnl0", "tunl0", "gre0", "gretap0", "erspan0", "sit0", "ip6gre0"}
+)
 # A container host has dozens of bridges and veth pairs; the refusal names a few
 # and counts the rest rather than printing a wall of them.
 _REPORTED_INTERFACE_LIMIT = 5
@@ -287,6 +294,45 @@ def _summarise_interfaces(names: Sequence[str]) -> str:
     return f"{listed} and {remainder} more" if remainder > 0 else listed
 
 
+def addressed_interfaces() -> frozenset[str] | None:
+    """Interface names that carry at least one IPv4 or IPv6 address.
+
+    A fresh network namespace is not empty: the kernel materialises its fallback
+    tunnel devices there on demand (``ip6tnl0``, ``tunl0``, ``gre0``,
+    ``gretap0``, ``erspan0`` on the development host). They are down, arp-less
+    and above all *unaddressed*, so nothing can be reached through them -- but a
+    verifier that only counts names refuses a namespace that is genuinely
+    isolated, which it did. Counting addresses is the property that matters:
+    a namespace with no addressed interface outside loopback has no egress.
+
+    ``None`` when the kernel cannot be asked (no ``fcntl``/``/proc``), in which
+    case the caller keeps the conservative name-only rule.
+    """
+
+    try:
+        import fcntl
+        import struct
+
+        addressed: set[str] = set()
+        for _index, name in socket.if_nameindex():
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                packed = struct.pack("256s", name.encode("utf-8")[:15])
+                try:
+                    fcntl.ioctl(probe.fileno(), 0x8915, packed)  # SIOCGIFADDR
+                except OSError:
+                    pass
+                else:
+                    addressed.add(name)
+        with open("/proc/net/if_inet6", encoding="ascii") as listing:
+            for line in listing:
+                fields = line.split()
+                if len(fields) >= 6:
+                    addressed.add(fields[5])
+        return frozenset(addressed)
+    except Exception:  # pragma: no cover - platforms without fcntl or /proc
+        return None
+
+
 def network_isolation(*, requested: bool, interfaces: Sequence[str] | None = None) -> dict[str, Any]:
     """Observe the namespace and refuse if the isolation the run claims is absent.
 
@@ -297,13 +343,31 @@ def network_isolation(*, requested: bool, interfaces: Sequence[str] | None = Non
     skipped the ``unshare`` re-exec and the run still attested isolation --
     reproduced, and the reason the marker is now an argv flag.
 
-    A namespace whose only interface is loopback cannot reach anything off the
-    host, which is the property the lane sells; how it came about does not
-    matter, so an operator already inside such a namespace passes too.
+    A namespace with no addressed interface outside loopback cannot reach
+    anything off the host, which is the property the lane sells; how the
+    namespace came about does not matter, so an operator already inside one
+    passes too. Names alone are not that property: see
+    :func:`addressed_interfaces` for the kernel-materialised tunnel devices that
+    are present in every namespace and carry no address.
     """
 
     observed = observed_network_interfaces() if interfaces is None else tuple(sorted(interfaces))
-    routable = tuple(name for name in observed if name not in LOOPBACK_INTERFACE_NAMES)
+    addressed = addressed_interfaces() if interfaces is None else None
+    if addressed is None:
+        # The namespace could not be asked for addresses; keep the name-only rule
+        # rather than declaring an unverifiable namespace isolated.
+        routable = tuple(
+            name
+            for name in observed
+            if name not in LOOPBACK_INTERFACE_NAMES and name not in FALLBACK_TUNNEL_INTERFACE_NAMES
+        )
+    else:
+        routable = tuple(
+            name
+            for name in observed
+            if name not in LOOPBACK_INTERFACE_NAMES
+            and (name in addressed or name not in FALLBACK_TUNNEL_INTERFACE_NAMES)
+        )
     if requested and routable:
         raise CaptureRefusal(
             "network isolation is not in effect: this namespace still carries "

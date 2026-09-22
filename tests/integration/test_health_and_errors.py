@@ -155,18 +155,27 @@ async def test_assets_js_served_as_javascript_despite_poisoned_registry(async_cl
 
     from app.main import _ensure_web_asset_mime_types
 
-    asset_name = next(
-        (candidate.name for candidate in sorted((_STATIC_DIR / "assets").glob("*.js"))),
-        None,
-    )
-    assert asset_name is not None, "built dashboard assets missing; run cd frontend && bun run build"
+    # Serve the built bundle when it exists, and otherwise write the one asset
+    # this test needs: requiring a prior `bun run build` made the test fail in a
+    # fresh checkout, and the MIME registration it covers has nothing to do with
+    # the bundle's contents. The sibling SPA-route test creates its index.html the
+    # same way.
+    assets_dir = _STATIC_DIR / "assets"
+    asset_name = next((candidate.name for candidate in sorted(assets_dir.glob("*.js"))), None)
+    created_asset = asset_name is None
+    if created_asset:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        asset_name = "spa-mime-regression.js"
+        (assets_dir / asset_name).write_text("export const spaMimeRegression = true;\n", encoding="utf-8")
 
-    mimetypes.add_type("text/plain", ".js")
     try:
+        mimetypes.add_type("text/plain", ".js")
         _ensure_web_asset_mime_types()
         response = await async_client.get(f"/assets/{asset_name}")
     finally:
         _ensure_web_asset_mime_types()
+        if created_asset:
+            (assets_dir / asset_name).unlink(missing_ok=True)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/javascript")
