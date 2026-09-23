@@ -1,0 +1,14 @@
+# Integration files the MySQL acceptance list deliberately does not run.
+#
+# Every entry is "<path>\t<reason>". `tools/mysql_target_audit.py --check` fails
+# for any *other* file that drives the test database and exercises dialect
+# branches, so an exclusion here is reviewed code rather than an oversight.
+
+# The bridge/websocket suites need their own transport harness; they are excluded
+# from the default SQLite integration run for the same reason.
+tests/integration/test_http_responses_bridge.py	excluded from the default integration run too: needs the bridge transport harness
+tests/integration/test_proxy_websocket_responses.py	excluded from the default integration run too: needs the websocket transport harness
+
+# Ring/cap-partitioning tests build their own sqlite+aiosqlite engines, so they
+# cannot exercise MySQL at all (documented in the port's progress notes).
+tests/integration/test_multi_replica.py	self-contained sqlite engines; cannot exercise MySQL

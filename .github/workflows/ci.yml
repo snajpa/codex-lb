@@ -700,6 +700,15 @@ jobs:
           enable-cache: true
           prune-cache: true
 
+      - name: Audit MySQL target coverage
+        if: needs.changes.outputs.backend == 'true'
+        # Report-only: it prints how many database-driving integration files
+        # exercise dialect branches without being in MYSQL_PYTEST_TARGETS (and
+        # which are excluded with a reason), so the gap stays visible in every
+        # build instead of being rediscovered by hand. Pass --check to make it a
+        # gate once the candidate list is closed.
+        run: uv run python tools/mysql_target_audit.py
+
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
         run: make test-mysql

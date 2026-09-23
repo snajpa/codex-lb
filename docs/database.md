@@ -133,6 +133,10 @@ the live one):
 | `mysql_explain_review.py` | `EXPLAIN`s the hot query *shapes* against the rehearsal data (plan/index evidence) |
 | `mysql_hot_path_review.py` | seeds its own production-shaped month, drives the real repository paths and `EXPLAIN ANALYZE`s every statement they emit (timing evidence); it refuses any database name that does not end in `_perf`, `_probe`, `_smoke` or `_review` |
 
+`mysql_target_audit.py` reports integration files that drive the test database and exercise dialect-branched
+code without being in `MYSQL_PYTEST_TARGETS`, so a missing target shows up in review instead of staying
+invisible. The CI job prints its report; `--check` turns it into a gate.
+
 ---
 
 *Specs: [database-backends](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-backends) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations)*
