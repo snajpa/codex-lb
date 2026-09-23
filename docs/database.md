@@ -122,6 +122,17 @@ there rather than a curated subset. Tests that genuinely require PostgreSQL sema
 interleavings, query-plan assertions, `reloptions` tuning) are skipped with that reason in their summary
 line.
 
+The review work behind those numbers lives in `tools/`, all of it pointed at a disposable database (never
+the live one):
+
+| Tool | Purpose |
+| --- | --- |
+| `mysql_data_rehearsal.py` | loads the production SQLite snapshot into MySQL for a real-data rehearsal |
+| `mysql_sample_load.py` | loads a bounded sample of the two big tables, enough for meaningful plans |
+| `mysql_width_check.py` | compares emitted column widths against the snapshot's measured maxima |
+| `mysql_explain_review.py` | `EXPLAIN`s the hot query *shapes* against the rehearsal data (plan/index evidence) |
+| `mysql_hot_path_review.py` | seeds its own production-shaped month, drives the real repository paths and `EXPLAIN ANALYZE`s every statement they emit (timing evidence); it refuses any database name that does not end in `_perf`, `_probe`, `_smoke` or `_review` |
+
 ---
 
 *Specs: [database-backends](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-backends) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations)*
