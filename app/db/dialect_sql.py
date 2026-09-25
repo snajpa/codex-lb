@@ -47,6 +47,19 @@ def is_mysql(target: Any) -> bool:
     return _dialect_name_of(target) in MYSQL_DIALECT_NAMES
 
 
+def is_mariadb(target: Any) -> bool:
+    """True when the dialect behind a session/connection/engine/name is MariaDB.
+
+    A ``mysql+pymysql://`` (or ``mysql+asyncmy://``) URL keeps the dialect name
+    ``mysql`` even when the server is MariaDB, so the name alone is not enough:
+    SQLAlchemy reports the server through the dialect's ``is_mariadb`` flag.
+    """
+    dialect = getattr(target, "dialect", target)
+    if str(getattr(dialect, "name", "")) == "mariadb":
+        return True
+    return bool(getattr(dialect, "is_mariadb", False))
+
+
 def dialect_name(session: Any) -> str:
     """Name of the dialect behind a Session/AsyncSession ('' when unknown)."""
     try:
@@ -212,7 +225,12 @@ def _epoch_argument(element: FunctionElement) -> Any:
 @compiles(epoch_seconds, "mysql")
 @compiles(epoch_seconds, "mariadb")
 def _compile_epoch_seconds_mysql(element, compiler, **kw):  # type: ignore[no-untyped-def]
-    return f"UNIX_TIMESTAMP({compiler.process(_epoch_argument(element), **kw)})"
+    # ``UNIX_TIMESTAMP(col)`` converts the stored naive datetime *from the session
+    # time zone*, so the same row buckets differently on a server or connection
+    # whose zone is not UTC. The database stores naive UTC, so take the arithmetic
+    # difference from the epoch instead: two DATETIME values, no zone involved.
+    argument = compiler.process(_epoch_argument(element), **kw)
+    return f"CAST(TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', {argument}) AS SIGNED)"
 
 
 @compiles(epoch_seconds, "postgresql")
