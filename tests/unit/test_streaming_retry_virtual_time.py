@@ -450,3 +450,69 @@ async def test_stream_once_api_key_heartbeat_is_scheduler_owned(monkeypatch: pyt
     await scheduler.drain()
     assert scheduler.owned_tasks == frozenset()
     assert await service.drain_persistence_tasks(timeout_seconds=1.0)
+
+
+@pytest.mark.asyncio
+async def test_stream_incomplete_retry_reallocates_sticky_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service, clock, scheduler = _virtual_service(request_logs)
+    account = _make_account("acc_virtual_wedge")
+    attempts = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module, "backoff_seconds", lambda _attempt: 2.5)
+    selection = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+
+    async def fake_stream_once(_account: Account, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _TransientStreamError(
+                "stream_incomplete",
+                cast(UpstreamError, {"message": "Upstream closed stream without completion", "code": "stream_incomplete"}),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_virtual_wedge"}}\n\n'
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-virtual-wedge"},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    consumer = scheduler.create_task(collect())
+    try:
+        await scheduler.drain()
+        await scheduler.advance(2.5)
+        chunks = await consumer
+        assert attempts == 2
+        assert any("response.completed" in chunk for chunk in chunks)
+        # The retry after an EOF-before-terminal must not replay the closed
+        # conversation: the affinity used for the retry has to reallocate.
+        assert selection.await_count >= 2, "retry did not re-resolve the account affinity"
+        assert selection.await_args_list[-1].kwargs["affinity_policy"].reallocate_sticky is True
+    finally:
+        await scheduler.cancel_owned_tasks()
