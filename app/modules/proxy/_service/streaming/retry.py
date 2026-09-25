@@ -2759,7 +2759,16 @@ class _StreamingRetryMixin:
                                 yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                                 return
                             transient_retries += 1
-                            if (
+                            if error_code == "stream_incomplete":
+                                # The upstream ended the stream before any
+                                # terminal event; replaying inside the same
+                                # sticky target can re-enter the closed
+                                # conversation. Reallocate and fall through to
+                                # selection so the retry starts a fresh
+                                # continuity target instead of retrying in
+                                # place.
+                                affinity = replace(affinity, reallocate_sticky=True)
+                            elif (
                                 transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
                                 and proxy._remaining_budget_seconds(deadline) > 0
                                 and not settlement.downstream_visible
