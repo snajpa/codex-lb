@@ -1327,8 +1327,18 @@ class UsageRepository:
         ]
 
     async def latest_window_minutes(self, window: str) -> int | None:
+        # Read the newest row's value instead of aggregating every row. The window length is
+        # a property of the window, so max() over the whole history buys nothing: it costs a
+        # full scan (250 ms over 450k rows, and 155 ms even with a covering index, because
+        # the engine does not use a loose index scan here). Ordered by recorded_at the same
+        # answer comes from one index entry (0.65 ms measured) via idx_usage_recorded_at.
         conditions = _window_clause(window)
-        result = await self._session.execute(select(func.max(UsageHistory.window_minutes)).where(conditions))
+        result = await self._session.execute(
+            select(UsageHistory.window_minutes)
+            .where(conditions)
+            .order_by(UsageHistory.recorded_at.desc())
+            .limit(1)
+        )
         value = result.scalar_one_or_none()
         return int(value) if value is not None else None
 
