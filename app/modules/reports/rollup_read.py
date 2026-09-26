@@ -103,12 +103,25 @@ def report_source(
     high = case((watermark < w.c.hi_at, watermark), else_=w.c.hi_at)
     tail_start = case((high <= w.c.lo_at, w.c.start_at), else_=high)
 
+    # The per-window bounds come from the materialised window CTE, which the optimizer
+    # cannot turn into a range access: it full-scanned request_logs (450k rows on the
+    # staging copy, 26 s for a week's report). Repeating the whole span as literals is
+    # redundant for correctness — the join still applies the per-window bounds — but it
+    # gives the optimizer a constant range to enter the time index with.
+    span_start = min(start for _, start, _ in windows)
+    span_end = max(end for _, _, end in windows)
+
     def raw(start, end, extra=()):
         stmt = (
             select(*raw_columns)
             .select_from(w)
             .join(RequestLog, (RequestLog.requested_at >= start) & (RequestLog.requested_at < end))
-            .where(_normal_traffic_clause(), *extra)
+            .where(
+                _normal_traffic_clause(),
+                RequestLog.requested_at >= literal(span_start),
+                RequestLog.requested_at < literal(span_end),
+                *extra,
+            )
         )
         return stmt.distinct() if catalog else stmt.group_by(w.c.report_date, *raw_dimensions)
 
