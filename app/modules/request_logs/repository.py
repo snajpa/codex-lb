@@ -1594,6 +1594,24 @@ class RequestLogsRepository:
         # of database time (worst 23.9 s, 37.6 M rows examined).
         dialect_name = self._session.get_bind().dialect.name
         emulate_skip_scan = dialect_name in {"sqlite", "mysql", "mariadb"}
+        if dialect_name in {"mysql", "mariadb"} and not prefix_conditions:
+            # MariaDB (and MySQL) re-evaluate the chain's correlated probe on
+            # every step instead of taking the bounded btree step the design
+            # assumes: measured on the production table, the recursive form costs
+            # 3.1 s for the account facet (2.1 s with an ordered LIMIT 1
+            # successor, 3.8 s with FORCE INDEX), while the visibility probe
+            # alone is 1.9 ms. Enumerating with GROUP BY over the facet-leading
+            # index is a loose index scan there (``Using index for group-by``,
+            # 0.4-1.0 ms) and issues no DISTINCT, so the chain's contract is kept
+            # for SQLite and PostgreSQL and the enumeration is engine-local.
+            listing = select(column).where(*prefix_conditions).group_by(column).order_by(column.asc())
+            listed = [value for (value,) in (await self._session.execute(listing)).all() if value is not None]
+            visible_values: list[str] = []
+            for value in listed:
+                probe = select(RequestLog.id).where(*conditions, column == value).limit(1)
+                if (await self._session.execute(probe)).scalar_one_or_none() is not None:
+                    visible_values.append(value)
+            return visible_values
         scan_conditions = prefix_conditions if emulate_skip_scan else conditions
         seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
