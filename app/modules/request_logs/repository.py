@@ -1622,11 +1622,18 @@ class RequestLogsRepository:
             # for SQLite and PostgreSQL and the enumeration is engine-local.
             listing = select(column).where(*prefix_conditions).group_by(column).order_by(column.asc())
             listed = [value for (value,) in (await self._session.execute(listing)).all() if value is not None]
+            # Visibility in one round trip: a query per candidate would be
+            # thousands of round trips when a facet has many historical values
+            # and few live ones. GROUP BY keeps the result set to the visible
+            # values, ordered like the enumeration.
             visible_values: list[str] = []
-            for value in listed:
-                probe = select(RequestLog.id).where(*conditions, column == value).limit(1)
-                if (await self._session.execute(probe)).scalar_one_or_none() is not None:
-                    visible_values.append(value)
+            if listed:
+                visible_stmt = (
+                    select(column).where(*conditions, column.in_(listed)).group_by(column).order_by(column.asc())
+                )
+                visible_values = [
+                    value for (value,) in (await self._session.execute(visible_stmt)).all() if value is not None
+                ]
             return visible_values
         scan_conditions = prefix_conditions if emulate_skip_scan else conditions
         seed = select(func.min(column).label("val")).where(*scan_conditions)
@@ -1652,15 +1659,19 @@ class RequestLogsRepository:
         ordering (SQLite: first, MySQL/MariaDB: first, PostgreSQL: last) so
         results match the legacy DISTINCT path exactly."""
         nulls_first = self._session.get_bind().dialect.name in ("sqlite", "mysql", "mariadb")
+        values = [value for value in await self._distinct_skip_scan(leading, conditions) if value]
+        # Which leading values also carry a NULL second value, in **one** grouped
+        # query: a probe per value made the unfiltered panel a round trip each
+        # (measured ~1 s apiece at 42 calls/hour against the live slow log).
+        null_bearing: set[str] = set()
+        if values:
+            null_stmt = select(leading).where(*conditions, second.is_(None), leading.in_(values)).group_by(leading)
+            null_bearing = {value for (value,) in (await self._session.execute(null_stmt)).all() if value}
         pairs: list[tuple[str, str | None]] = []
-        for value in await self._distinct_skip_scan(leading, conditions):
-            if not value:
-                # Legacy DISTINCT drops falsy leading values in Python.
-                continue
+        for value in values:
             prefix = leading == value
             value_conditions = [*conditions, prefix]
-            null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
-            has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
+            has_null = value in null_bearing
             second_values = await self._distinct_skip_scan(second, value_conditions, prefix_conditions=(prefix,))
             if has_null and nulls_first:
                 pairs.append((value, None))
