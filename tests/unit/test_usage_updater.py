@@ -858,10 +858,14 @@ class StubAdditionalUsageRepository:
         return utcnow() if account_id in self._written_accounts else None
 
     async def latest_recorded_at_by_account(self, account_ids):
-        from app.core.utils.time import utcnow
-
-        now = utcnow()
-        return {account_id: now for account_id in account_ids if account_id in self._written_accounts}
+        # Defined in terms of the single-account read so tests that monkeypatch that
+        # method (the interval/aging cases) keep exercising the batched path.
+        result = {}
+        for account_id in account_ids:
+            value = await self.latest_recorded_at_for_account(account_id)
+            if value is not None:
+                result[account_id] = value
+        return result
 
     async def list_limit_names(
         self,

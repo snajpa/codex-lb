@@ -330,6 +330,7 @@ class UsageUpdater:
                 latest,
                 now=now,
                 interval_seconds=interval,
+                freshness=additional_freshness,
             ):
                 continue
             # Additional-only accounts have no main UsageHistory entry.
@@ -489,14 +490,27 @@ class UsageUpdater:
             usage_account_id=usage_account_id,
         )
 
-    async def _additional_usage_is_stale(self, account_id: str, *, now: datetime, interval_seconds: int) -> bool:
+    async def _additional_usage_is_stale(
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+        interval_seconds: int,
+        freshness: dict[str, datetime] | None = None,
+    ) -> bool:
         # The upstream fetch is the only path that syncs additional
         # (per-model) rate limits; live main-window rows must not keep an
         # account "fresh" while its additional rows age past the interval,
         # or gated-model routing starves on additional_quota_data_unavailable.
         if self._additional_usage_repo is None:
             return False
-        latest_at = await self._additional_usage_repo.latest_recorded_at_for_account(account_id)
+        # A caller that already read every account's freshness passes the map here, so the
+        # per-account round trip disappears; the map only holds accounts that have rows, so
+        # a missing entry means "never fetched" exactly as a NULL does.
+        if freshness is not None:
+            latest_at = freshness.get(account_id)
+        else:
+            latest_at = await self._additional_usage_repo.latest_recorded_at_for_account(account_id)
         if latest_at is None:
             # No additional rows ever fetched: live rows alone must not
             # suppress the fetch, or a first gated-model use would never be
@@ -519,9 +533,12 @@ class UsageUpdater:
         *,
         now: datetime,
         interval_seconds: int,
+        freshness: dict[str, datetime] | None = None,
     ) -> bool:
         if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval_seconds):
-            return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
+            return not await self._additional_usage_is_stale(
+                account.id, now=now, interval_seconds=interval_seconds, freshness=freshness
+            )
         # A stale (or elapsed-reset) newest row of one window must not
         # permanently defeat freshness once upstream stops reporting that
         # window: a strictly newer sibling-window row proves a later fetch
@@ -550,7 +567,9 @@ class UsageUpdater:
             return False
         if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):
             return False
-        return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
+        return not await self._additional_usage_is_stale(
+            account.id, now=now, interval_seconds=interval_seconds, freshness=freshness
+        )
 
     @staticmethod
     async def _load_owned_session_updater(account_id: str) -> tuple[UsageUpdater, Account] | None:
