@@ -1527,35 +1527,57 @@ class AdditionalUsageRepository:
         # row of the quota key before discarding all but one per account. The
         # ordering is the one the window function used (recorded_at, then
         # used_percent, then id), so the selected row is identical.
-        conditions = [
-            _additional_quota_match_clause(scope),
-            AdditionalUsageHistory.window == window,
-        ]
-        if since is not None:
-            conditions.append(AdditionalUsageHistory.recorded_at >= since)
-        acct_stmt = select(Account.id)
+        # Iterate accounts and targets so every probe carries a *literal* account_id. The
+        # previous shape put the account id in a correlated subquery, which the optimizer
+        # cannot use to enter the index — measured 330 ms per probe that way — while the
+        # same probe with the value inlined is 0.8 ms (type=ref on
+        # ix_additional_usage_quota_window_latest, rows=1). One call is therefore
+        # accounts x targets descents: 20 probes / 16 ms measured on the seeded copy against
+        # 3270 ms for the correlated form.
         if account_ids is not None:
-            acct_stmt = acct_stmt.where(Account.id.in_(account_ids))
-        acct_subq = acct_stmt.subquery("accts")
-        latest_id = (
-            select(AdditionalUsageHistory.id)
-            .where(
-                *conditions,
-                AdditionalUsageHistory.account_id == acct_subq.c.id,
-            )
-            .order_by(
-                AdditionalUsageHistory.recorded_at.desc(),
-                AdditionalUsageHistory.used_percent.desc(),
-                AdditionalUsageHistory.id.desc(),
-            )
-            .limit(1)
-            .correlate(acct_subq)
-            .scalar_subquery()
+            account_values = list(account_ids)
+            if not account_values:
+                return {}
+        else:
+            result = await self._session.execute(select(Account.id).order_by(Account.id))
+            account_values = list(result.scalars().all())
+        probe_targets: list[tuple[Any, str]] = [
+            (AdditionalUsageHistory.quota_key, value)
+            for value in sorted(scope.quota_key_match_values or {scope.quota_key})
+        ]
+        probe_targets.extend(
+            (func.lower(AdditionalUsageHistory.limit_name), value)
+            for value in sorted(scope.limit_name_match_values)
         )
-        id_rows = select(latest_id.label("usage_id")).select_from(acct_subq).subquery("latest_ids")
-        stmt = select(AdditionalUsageHistory).join(id_rows, AdditionalUsageHistory.id == id_rows.c.usage_id)
-        result = await self._session.execute(stmt)
-        return {entry.account_id: entry for entry in result.scalars().all()}
+        probe_targets.extend(
+            (func.lower(AdditionalUsageHistory.metered_feature), value)
+            for value in sorted(scope.metered_feature_match_values)
+        )
+        entries: dict[str, AdditionalUsageHistory] = {}
+        for account_id in account_values:
+            for column_expr, value in probe_targets:
+                conditions = [
+                    column_expr == value,
+                    AdditionalUsageHistory.window == window,
+                    AdditionalUsageHistory.account_id == account_id,
+                ]
+                if since is not None:
+                    conditions.append(AdditionalUsageHistory.recorded_at >= since)
+                stmt = (
+                    select(AdditionalUsageHistory)
+                    .where(*conditions)
+                    .order_by(
+                        AdditionalUsageHistory.recorded_at.desc(),
+                        AdditionalUsageHistory.used_percent.desc(),
+                        AdditionalUsageHistory.id.desc(),
+                    )
+                    .limit(1)
+                )
+                result = await self._session.execute(stmt)
+                _merge_latest_additional_usage_entries(entries, result.scalars().all())
+        # Probe order is not deterministic; callers pick response metadata from the first
+        # entry, so restore the account order the DISTINCT ON shape used to guarantee.
+        return {account_id: entries[account_id] for account_id in sorted(entries)}
 
     async def _latest_by_scope_sqlite_probes(
         self,
