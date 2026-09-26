@@ -397,23 +397,58 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
         # if the ACCOUNT aggregate sees it (non-warmup, live, account
         # attached) or the API-KEY aggregate sees it (non-warmup, key
         # attached — soft-deleted rows included), so take the least of both.
-        account_earliest = (
+        # Both aggregates scan: the warmup exclusion is a ``NOT IN`` over a
+        # non-leading column, so no index can narrow it (measured 6.6 s for the
+        # account variant on 1.45 M rows). The earliest index-reachable row is a
+        # dive on ``(requested_at, id)``, and it is the answer whenever it also
+        # satisfies the aggregate's other predicates, so probe first and fall back
+        # to the aggregate only when it does not.
+        account_probe = (
             await session.execute(
-                select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.deleted_at.is_(None),
-                    RequestLog.account_id.is_not(None),
-                )
+                select(RequestLog.requested_at, RequestLog.request_kind, RequestLog.account_id)
+                .where(RequestLog.deleted_at.is_(None))
+                .order_by(RequestLog.requested_at.asc())
+                .limit(1)
             )
-        ).scalar_one_or_none()
-        key_earliest = (
+        ).first()
+        if (
+            account_probe is not None
+            and account_probe[1] not in _EXCLUDED_REQUEST_KINDS
+            and account_probe[2] is not None
+        ):
+            account_earliest = account_probe[0]
+        else:
+            account_earliest = (
+                await session.execute(
+                    select(func.min(RequestLog.requested_at)).where(
+                        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                        RequestLog.deleted_at.is_(None),
+                        RequestLog.account_id.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        key_probe = (
             await session.execute(
-                select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.api_key_id.is_not(None),
-                )
+                select(RequestLog.requested_at, RequestLog.request_kind, RequestLog.api_key_id)
+                .order_by(RequestLog.requested_at.asc())
+                .limit(1)
             )
-        ).scalar_one_or_none()
+        ).first()
+        if (
+            key_probe is not None
+            and key_probe[1] not in _EXCLUDED_REQUEST_KINDS
+            and key_probe[2] is not None
+        ):
+            key_earliest = key_probe[0]
+        else:
+            key_earliest = (
+                await session.execute(
+                    select(func.min(RequestLog.requested_at)).where(
+                        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                        RequestLog.api_key_id.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
         candidates = [value for value in (account_earliest, key_earliest) if value is not None]
         earliest = min(candidates) if candidates else None
         if earliest is None:
