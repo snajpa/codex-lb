@@ -1594,7 +1594,7 @@ class RequestLogsRepository:
         # of database time (worst 23.9 s, 37.6 M rows examined).
         dialect_name = self._session.get_bind().dialect.name
         emulate_skip_scan = dialect_name in {"sqlite", "mysql", "mariadb"}
-        if dialect_name in {"mysql", "mariadb"} and not prefix_conditions:
+        if dialect_name in {"mysql", "mariadb"}:
             # MariaDB (and MySQL) re-evaluate the chain's correlated probe on
             # every step instead of taking the bounded btree step the design
             # assumes: measured on the production table, the recursive form costs
