@@ -380,66 +380,77 @@ def _daily_speed_medians_stmt(
         ),
     )
     token_count = RequestLog.output_tokens - func.coalesce(RequestLog.reasoning_tokens, 0)
-    ttft_values_cte = (
+    # One pass over the day's traffic rows instead of three separate joins: every
+    # panel's value is derived in the same scan as a nullable column, and each
+    # ranking below only filters the column it ranks. The three joins each re-read
+    # the same day range, which is what made the daily panels expensive.
+    daily_values_cte = (
         select(
             day_ranges_cte.c.report_date,
-            RequestLog.latency_first_token_ms.label("ttft_ms"),
+            case(
+                (RequestLog.latency_first_token_ms.is_not(None), RequestLog.latency_first_token_ms),
+                else_=None,
+            ).label("ttft_ms"),
+            case(
+                (
+                    and_(
+                        token_count.is_not(None),
+                        token_count > 0,
+                        RequestLog.latency_ms.is_not(None),
+                        RequestLog.latency_first_token_ms.is_not(None),
+                        RequestLog.latency_ms > RequestLog.latency_first_token_ms,
+                    ),
+                    token_count * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms),
+                ),
+                else_=None,
+            ).label("tps"),
+            case(
+                (RequestLog.latency_queue_ms.is_not(None), RequestLog.latency_queue_ms),
+                else_=None,
+            ).label("queue_ms"),
         )
         .select_from(traffic_join)
-        .where(RequestLog.latency_first_token_ms.is_not(None))
-        .cte("daily_ttft_values")
+        .cte("daily_values")
     )
-    tps_values_cte = (
+    ttft_count = func.count().over(partition_by=daily_values_cte.c.report_date)
+    ttft_ranked_cte = (
         select(
-            day_ranges_cte.c.report_date,
-            (token_count * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms)).label("tps"),
+            daily_values_cte.c.report_date,
+            daily_values_cte.c.ttft_ms,
+            ttft_count.label("sample_count"),
+            func.row_number()
+            .over(partition_by=daily_values_cte.c.report_date, order_by=daily_values_cte.c.ttft_ms)
+            .label("ttft_rank"),
         )
-        .select_from(traffic_join)
-        .where(
-            token_count.is_not(None),
-            token_count > 0,
-            RequestLog.latency_ms.is_not(None),
-            RequestLog.latency_first_token_ms.is_not(None),
-            RequestLog.latency_ms > RequestLog.latency_first_token_ms,
-        )
-        .cte("daily_tps_values")
+        .where(daily_values_cte.c.ttft_ms.is_not(None))
+        .cte("daily_ttft_ranks")
     )
-    queue_values_cte = (
+    tps_count = func.count().over(partition_by=daily_values_cte.c.report_date)
+    tps_ranked_cte = (
         select(
-            day_ranges_cte.c.report_date,
-            RequestLog.latency_queue_ms.label("queue_ms"),
+            daily_values_cte.c.report_date,
+            daily_values_cte.c.tps,
+            tps_count.label("sample_count"),
+            func.row_number()
+            .over(partition_by=daily_values_cte.c.report_date, order_by=daily_values_cte.c.tps)
+            .label("tps_rank"),
         )
-        .select_from(traffic_join)
-        .where(RequestLog.latency_queue_ms.is_not(None))
-        .cte("daily_queue_values")
+        .where(daily_values_cte.c.tps.is_not(None))
+        .cte("daily_tps_ranks")
     )
-    ttft_count = func.count().over(partition_by=ttft_values_cte.c.report_date)
-    ttft_ranked_cte = select(
-        ttft_values_cte.c.report_date,
-        ttft_values_cte.c.ttft_ms,
-        ttft_count.label("sample_count"),
-        func.row_number()
-        .over(partition_by=ttft_values_cte.c.report_date, order_by=ttft_values_cte.c.ttft_ms)
-        .label("ttft_rank"),
-    ).cte("daily_ttft_ranks")
-    tps_count = func.count().over(partition_by=tps_values_cte.c.report_date)
-    tps_ranked_cte = select(
-        tps_values_cte.c.report_date,
-        tps_values_cte.c.tps,
-        tps_count.label("sample_count"),
-        func.row_number()
-        .over(partition_by=tps_values_cte.c.report_date, order_by=tps_values_cte.c.tps)
-        .label("tps_rank"),
-    ).cte("daily_tps_ranks")
-    queue_count = func.count().over(partition_by=queue_values_cte.c.report_date)
-    queue_ranked_cte = select(
-        queue_values_cte.c.report_date,
-        queue_values_cte.c.queue_ms,
-        queue_count.label("sample_count"),
-        func.row_number()
-        .over(partition_by=queue_values_cte.c.report_date, order_by=queue_values_cte.c.queue_ms)
-        .label("queue_rank"),
-    ).cte("daily_queue_ranks")
+    queue_count = func.count().over(partition_by=daily_values_cte.c.report_date)
+    queue_ranked_cte = (
+        select(
+            daily_values_cte.c.report_date,
+            daily_values_cte.c.queue_ms,
+            queue_count.label("sample_count"),
+            func.row_number()
+            .over(partition_by=daily_values_cte.c.report_date, order_by=daily_values_cte.c.queue_ms)
+            .label("queue_rank"),
+        )
+        .where(daily_values_cte.c.queue_ms.is_not(None))
+        .cte("daily_queue_ranks")
+    )
 
     # A median contains the one center row for odd samples and both center rows
     # for even samples. Multiplication avoids dialect-specific integer division.
