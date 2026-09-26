@@ -1741,6 +1741,23 @@ class AdditionalUsageRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def latest_recorded_at_by_account(self, account_ids: Collection[str]) -> dict[str, datetime]:
+        """Return the most recent recorded_at per account, in one read.
+
+        The refresh loop asks this question once per account, which costs one round trip per
+        account per pass. Grouping the same MAX() over an IN list answers all of them at once.
+        """
+        ids = list(account_ids)
+        if not ids:
+            return {}
+        stmt = (
+            select(AdditionalUsageHistory.account_id, func.max(AdditionalUsageHistory.recorded_at))
+            .where(AdditionalUsageHistory.account_id.in_(ids))
+            .group_by(AdditionalUsageHistory.account_id)
+        )
+        result = await self._session.execute(stmt)
+        return {account_id: recorded_at for account_id, recorded_at in result if recorded_at is not None}
+
     async def latest_recorded_at(self) -> datetime | None:
         """Return the most recent recorded_at across all additional usage entries."""
         stmt = select(func.max(AdditionalUsageHistory.recorded_at))

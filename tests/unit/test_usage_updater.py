@@ -857,6 +857,12 @@ class StubAdditionalUsageRepository:
 
         return utcnow() if account_id in self._written_accounts else None
 
+    async def latest_recorded_at_by_account(self, account_ids):
+        from app.core.utils.time import utcnow
+
+        now = utcnow()
+        return {account_id: now for account_id in account_ids if account_id in self._written_accounts}
+
     async def list_limit_names(
         self,
         *,

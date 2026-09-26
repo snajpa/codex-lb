@@ -311,6 +311,13 @@ class UsageUpdater:
         now = utcnow()
         interval = USAGE_REFRESH_INTERVAL_SECONDS
         _prune_usage_refresh_auth_cooldowns()
+        # One read for the whole pass instead of one per account: the loop below asks for
+        # each account's additional-usage freshness, which was a round trip per account.
+        additional_freshness: dict[str, datetime] = {}
+        if self._additional_usage_repo is not None:
+            additional_freshness = await self._additional_usage_repo.latest_recorded_at_by_account(
+                [account.id for account in accounts]
+            )
         for account in accounts:
             if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 continue
@@ -337,9 +344,7 @@ class UsageUpdater:
                 if not bypass_freshness and last_ok and (now - last_ok).total_seconds() < interval:
                     continue
                 if self._additional_usage_repo is not None:
-                    additional_fresh_at = await self._additional_usage_repo.latest_recorded_at_for_account(
-                        account.id,
-                    )
+                    additional_fresh_at = additional_freshness.get(account.id)
                     if (
                         not bypass_freshness
                         and additional_fresh_at
