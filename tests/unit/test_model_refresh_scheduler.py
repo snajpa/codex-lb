@@ -617,3 +617,101 @@ async def test_warmed_version_reaches_the_non_native_upstream_fingerprint(monkey
         assert warm["originator"] == "codex_cli_rs"
     finally:
         await cache.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_follower_backstops_a_stale_persisted_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a wedged lease holder must not strand the served catalog.
+
+    The live deployment had the lease held by a replica whose refresh failed
+    every cycle (an old image against the migrated schema). The persisted row
+    aged past its TTL, every replica -- followers included -- dropped to the
+    bootstrap floor, and the catalog silently lost the models that only the
+    refreshed snapshot carried. A follower now refreshes when the row is
+    demonstrably stale.
+    """
+
+    class _Follower:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> None:
+            return None
+
+    reconcile = AsyncMock(return_value=False)
+    refresh = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Follower())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+    monkeypatch.setattr(scheduler_module, "registry_snapshot_is_stale", AsyncMock(return_value=True))
+    monkeypatch.setattr(scheduler_module.ModelRefreshScheduler, "_refresh_as_leader", refresh)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(applied_content_hash="hash-published"),
+    )
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    reconcile.assert_awaited_once_with()
+    refresh.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_follower_drops_backstop_state_it_could_not_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backstop refresh that cannot publish must converge to the floor.
+
+    Serving the unpublished catalog of one replica would fork the fleet's
+    catalog; the pre-backstop behaviour (drop to the bootstrap floor) must
+    survive the backstop, so reconcile runs again after an unpublished refresh.
+    """
+
+    class _Follower:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> None:
+            return None
+
+    reconcile = AsyncMock(return_value=False)
+    refresh = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Follower())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+    monkeypatch.setattr(scheduler_module, "registry_snapshot_is_stale", AsyncMock(return_value=True))
+    monkeypatch.setattr(scheduler_module.ModelRefreshScheduler, "_refresh_as_leader", refresh)
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(applied_content_hash=None),
+    )
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    assert reconcile.await_count == 2
+    refresh.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_follower_stays_off_the_upstream_when_the_snapshot_is_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh persisted row is proof the leader is publishing; no backstop."""
+
+    class _Follower:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> None:
+            return None
+
+    reconcile = AsyncMock(return_value=False)
+    refresh = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Follower())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+    monkeypatch.setattr(scheduler_module, "registry_snapshot_is_stale", AsyncMock(return_value=False))
+    monkeypatch.setattr(scheduler_module.ModelRefreshScheduler, "_refresh_as_leader", refresh)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    reconcile.assert_awaited_once_with()
+    refresh.assert_not_awaited()

@@ -439,6 +439,29 @@ def _snapshot_age_seconds(header: StoredSnapshotHeader) -> float:
     return (utcnow() - to_utc_naive(header.refreshed_at)).total_seconds()
 
 
+async def registry_snapshot_is_stale() -> bool:
+    """Whether a persisted snapshot exists but has aged past its TTL.
+
+    A stale row is the liveness signal that the lease holder stopped
+    publishing -- a wedged replica (an old image that can no longer read the
+    migrated schema), a leader whose upstream fetch fails for every plan, ...
+    -- while still renewing the lease. Followers then stay followers, the row
+    expires, and every replica drops to the bootstrap floor. The refresh
+    scheduler uses this probe to decide whether to run its follower backstop
+    refresh. Probe failures report False so a transient read error never turns
+    into a lease-less fetch storm.
+    """
+    try:
+        async with get_background_session() as session:
+            header = await _probe_header(session)
+    except Exception:
+        logger.warning("Model registry staleness probe failed", exc_info=True)
+        return False
+    if header is None:
+        return False
+    return _snapshot_age_seconds(header) > get_settings().model_registry_snapshot_max_age_seconds
+
+
 async def reconcile_model_registry_from_store(*, raise_on_error: bool = False) -> bool:
     """Apply the persisted snapshot to the local registry when it differs.
 

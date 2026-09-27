@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import time
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
+import app.core.openai.model_registry_store as store_module
 from app.core.openai.model_registry import (
     ModelRegistry,
     ModelRegistryExport,
@@ -15,7 +18,9 @@ from app.core.openai.model_registry import (
     UpstreamModel,
 )
 from app.core.openai.model_registry_store import (
+    SCHEMA_VERSION,
     SNAPSHOT_CODEC_FIELDS,
+    StoredSnapshotHeader,
     UPSTREAM_MODEL_CODEC_FIELDS,
     decode_registry_payload,
     encode_registry_export,
@@ -264,3 +269,34 @@ class TestRegistryExportImport:
         await registry.clear()
         assert registry.applied_content_hash is None
         assert registry.get_snapshot() is None
+
+
+@pytest.mark.asyncio
+async def test_registry_snapshot_is_stale_follows_the_persisted_row_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The follower backstop keys off the row's age, and fails closed."""
+
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield object()
+
+    monkeypatch.setattr(store_module, "get_background_session", _session)
+
+    stale = StoredSnapshotHeader(
+        schema_version=SCHEMA_VERSION,
+        content_hash="hash-stale",
+        refreshed_at=utcnow() - timedelta(hours=25),
+    )
+    fresh = StoredSnapshotHeader(
+        schema_version=SCHEMA_VERSION,
+        content_hash="hash-fresh",
+        refreshed_at=utcnow() - timedelta(minutes=5),
+    )
+
+    for header, expected in ((stale, True), (fresh, False), (None, False)):
+        monkeypatch.setattr(store_module, "_probe_header", AsyncMock(return_value=header))
+        assert await store_module.registry_snapshot_is_stale() is expected
+
+    monkeypatch.setattr(store_module, "_probe_header", AsyncMock(side_effect=RuntimeError("db down")))
+    assert await store_module.registry_snapshot_is_stale() is False

@@ -528,6 +528,54 @@ async def test_former_leader_drops_unpublished_snapshot_when_store_is_expired(db
     assert registry.get_snapshot() is None
 
 
+async def test_wedged_lease_holder_does_not_strand_the_served_catalog(db_setup, monkeypatch) -> None:
+    """End-to-end regression for the stale-catalog incident.
+
+    The live deployment had the lease renewed every minute by a rollback replica
+    whose refresh failed on every cycle, so nothing advanced ``refreshed_at``;
+    the row aged past the staleness cap and every replica -- followers included
+    -- fell back to the bootstrap floor, dropping models upstream still routed
+    (the floor carries no gpt-6 models at all). A follower must republish the
+    catalog from a demonstrably stale row instead of only reconciling to it.
+    """
+    del db_setup
+    await _add_active_account("acc-follower")
+
+    # The only published row is the last one the wedged holder managed to write.
+    await _leader_persist(await _refreshed_leader_export())
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+    before = await _snapshot_row()
+    assert before is not None
+
+    model = _make_upstream_model(REPLICA_SLUG)
+
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+        return scheduler_module._FetchResult(
+            models=[model],
+            account_models={"acc-follower": ("pro", [model])},
+        )
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=False))
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _stub_fetch)
+    monkeypatch.setattr(invalidation_module, "_poller", CacheInvalidationPoller(SessionLocal))
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    after = await _snapshot_row()
+    assert after is not None
+    assert to_utc_naive(after.refreshed_at) > to_utc_naive(before.refreshed_at)
+    snapshot = get_model_registry().get_snapshot()
+    assert snapshot is not None
+    assert REPLICA_SLUG in snapshot.models
+
+
 async def test_unchanged_content_touches_refreshed_at_without_rewrite(db_setup) -> None:
     del db_setup
     export = await _refreshed_leader_export()

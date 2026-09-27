@@ -21,6 +21,7 @@ from app.core.openai.model_registry_store import (
     encode_registry_export,
     persist_registry_snapshot,
     reconcile_model_registry_from_store,
+    registry_snapshot_is_stale,
 )
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
@@ -111,6 +112,25 @@ class ModelRefreshScheduler:
             # covers losing the lease mid-refresh, where run_if_leader returns
             # None after cancelling the body.
             await reconcile_model_registry_from_store()
+            # Liveness backstop: a lease holder can stay wedged (an old image
+            # that can no longer read the migrated schema, an upstream fetch
+            # failing for every plan, ...) while still renewing the lease. The
+            # persisted row then ages past its TTL and every replica -- the
+            # followers included -- drops to the bootstrap floor, taking models
+            # out of the served catalog that upstream still routes fine. When
+            # the row is demonstrably stale, refresh anyway; publishing stays
+            # content-hash guarded, so a concurrent leader publish still wins
+            # and duplicate fetches collapse into one stored snapshot.
+            if await registry_snapshot_is_stale():
+                logger.warning("Persisted model registry snapshot is stale; refreshing without the lease")
+                await self._refresh_as_leader()
+                if get_model_registry().applied_content_hash is None:
+                    # The backstop could not publish (store write failed, or the
+                    # fetch produced nothing to persist). A replica must never
+                    # keep a catalog the rest of the fleet cannot see, so
+                    # converge to the bootstrap floor exactly like the
+                    # pre-backstop behaviour instead of serving state of our own.
+                    await reconcile_model_registry_from_store()
 
     async def _refresh_as_leader(self) -> bool:
         try:
