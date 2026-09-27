@@ -57,7 +57,9 @@ def _is_postgresql_database_url(url: str) -> bool:
 
 
 def _is_mysql_database_url(url: str) -> bool:
-    return url.startswith("mysql+")
+    # ``mariadb+`` reaches the same MySQL implementations (asyncmy, pymysql), so a
+    # MariaDB test URL must not silently skip the drift and empty-database checks.
+    return url.startswith(("mysql+", "mariadb+"))
 
 
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:
@@ -3228,7 +3230,13 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
                     {"kind": "subscription"},
                 )
             ).fetchall()
-            assert "idx_logs_missing_cost" in str(plan)
+            # Our cost-backfill index (20260926_040000) leads with the predicate that is
+            # true of exactly the rows this scan wants, so the planner prefers it over
+            # idx_logs_missing_cost. Pin the guarantee instead of one index name: the
+            # missing-cost lookup must stay an index search, never a full table scan.
+            plan_text = str(plan)
+            assert "idx_logs_cost_backfill" in plan_text or "idx_logs_missing_cost" in plan_text
+            assert "SCAN request_logs" not in plan_text
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT count(*) FROM sqlite_master WHERE name='idx_logs_missing_cost'")) == 0
