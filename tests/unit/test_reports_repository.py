@@ -724,10 +724,17 @@ def test_daily_speed_medians_stmt_compiles_to_portable_window_sql() -> None:
     for dialect in (sqlite_dialect(), postgresql_dialect()):
         sql = str(statement.compile(dialect=dialect, compile_kwargs={"literal_binds": True})).lower()
 
-        assert "row_number() over" in sql
-        assert "count(*) over" in sql
-        assert "group by daily_ttft_ranks.report_date" in sql
-        assert "group by daily_tps_ranks.report_date" in sql
+        # One windowed pass ranks all three panels (507b69b1): daily_ranks carries the
+        # ttft/tps/queue sample counts and ranks, and daily_medians picks the middle
+        # rank(s) per report_date in a single aggregation.
+        assert sql.count("row_number() over") == 3
+        assert "count(daily_values.ttft_ms) over (partition by daily_values.report_date)" in sql
+        assert "count(daily_values.tps) over (partition by daily_values.report_date)" in sql
+        assert "count(daily_values.queue_ms) over (partition by daily_values.report_date)" in sql
+        assert "from daily_values" in sql
+        assert "from daily_ranks group by daily_ranks.report_date" in sql
+        assert "daily_medians" in sql
+        assert sql.count("group by") == 1
         assert "percentile_cont" not in sql
 
 
