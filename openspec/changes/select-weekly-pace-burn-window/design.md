@@ -27,4 +27,5 @@ establish measurement coverage. If none remain usable, the account and fleet
 rate are unknown, not zero. A stable equal-percentage interval remains measured
 zero. The selectable card consumes only server pace results; the legacy local
 cumulative-week fallback is not a selected-window measurement. An explicit null
-from a fresh overview remains unavailable even if projections retain older data.
+from a fresh overview remains unavailable for every averaging window even if
+projections retain older data.

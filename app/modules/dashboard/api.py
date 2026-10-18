@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
@@ -20,6 +19,7 @@ from app.modules.dashboard.schemas import (
 )
 from app.modules.model_sources.catalog import source_models_to_upstream_models
 from app.modules.model_sources.repository import ModelSourcesRepository
+
 
 def _parse_burn_window_minutes(
     burn_window_minutes: int = Query(180, alias="burnWindowMinutes", json_schema_extra={"enum": [1, 15, 60, 180]}),

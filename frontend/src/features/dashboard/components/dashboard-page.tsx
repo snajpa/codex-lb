@@ -228,9 +228,11 @@ export function DashboardPage() {
   const overview = dashboardQuery.data;
   // Cumulative-week fallbacks are not measurements for the selected window.
   // An explicit unavailable overview also invalidates a retained projection.
-  const selectedWeeklyPace = burnWindowMinutes === 180 && overview?.weeklyCreditPace !== undefined
-    ? overview.weeklyCreditPace
-    : projectionsQuery.data?.weeklyCreditPace ?? null;
+  const selectedWeeklyPace = overview?.weeklyCreditPace === null
+    ? null
+    : burnWindowMinutes === 180 && overview?.weeklyCreditPace !== undefined
+      ? overview.weeklyCreditPace
+      : projectionsQuery.data?.weeklyCreditPace ?? null;
   const logPage = logsQuery.data;
 
   const view = useMemo(() => {

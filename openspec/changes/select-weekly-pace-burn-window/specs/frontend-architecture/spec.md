@@ -20,5 +20,5 @@ recommendations together without changing other dashboard timeframes or settings
 
 #### Scenario: The server cannot measure weekly pace
 - **WHEN** the current overview explicitly reports unavailable pace
-- **THEN** the default selectable card MUST preserve that unavailable state
+- **THEN** the selectable card MUST preserve that unavailable state for every averaging window
 - **AND** MUST NOT substitute a cumulative-week local estimate or retained projection under the 3 h label
