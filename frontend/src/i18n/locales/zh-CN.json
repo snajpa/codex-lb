@@ -879,6 +879,8 @@
   "dashboard.weeklyPace.reliefLine": "下次重置 {{duration}} 后 · 返还约 {{credits}} 积分",
   "dashboard.weeklyPace.resetTickTooltip": "{{time}} 重置 · +{{credits}} 积分",
   "dashboard.weeklyPace.runsDryBeforeRelief": "下次重置在 {{relief}} 后 — 晚于耗尽时间",
+  "dashboard.weeklyPace.withoutResets": "不考虑重置：约剩 {{duration}}",
+  "dashboard.weeklyPace.noProjectedDepletion": "两个配额周期内预计不会耗尽",
   "dashboard.weeklyPace.runsOutIn": "约 {{duration}} 后耗尽",
   "dashboard.weeklyPace.saturatedFloor": "所有账户已饱和 — 需求数据为下限",
   "dashboard.weeklyPace.scheduledByNow": "计划截至当前",

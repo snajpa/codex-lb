@@ -141,7 +141,7 @@ function throttleLine(pace: WeeklyCreditPace, t: ReturnType<typeof useTranslatio
     return null;
   }
   return t("dashboard.weeklyPace.recommendations.throttle", {
-    percent: formatApproxPercent(pace.reduceByPercent),
+    percent: formatApproxPercent(Math.ceil(pace.reduceByPercent)),
   });
 }
 
@@ -239,7 +239,9 @@ function RunwayWeeklyCreditsPaceCard({
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
 
   const burnRate = pace.burnRateRecentCreditsPerHour ?? null;
-  const etaHours = pace.depletionEtaHours != null && Number.isFinite(pace.depletionEtaHours) ? pace.depletionEtaHours : null;
+  const resetAware = pace.projectedDepletionHours !== undefined;
+  const projectedEta = resetAware ? pace.projectedDepletionHours : pace.depletionEtaHours;
+  const etaHours = projectedEta != null && Number.isFinite(projectedEta) ? projectedEta : null;
   const reliefHours = pace.nextReliefInHours != null && Number.isFinite(pace.nextReliefInHours) ? pace.nextReliefInHours : null;
   const reliefCredits = pace.nextReliefCredits ?? null;
   const saturated =
@@ -301,8 +303,12 @@ function RunwayWeeklyCreditsPaceCard({
                 title={etaAtLabel ?? undefined}
                 className={cn(runsDry && "font-medium text-red-600 dark:text-red-400")}
               >
-                {t("dashboard.weeklyPace.runsOutIn", { duration: formatDurationHours(etaHours, t) })}
+                {t(resetAware ? "dashboard.weeklyPace.runsOutIn" : "dashboard.weeklyPace.withoutResets", {
+                  duration: formatDurationHours(etaHours, t),
+                })}
               </span>
+            ) : resetAware && burnRate != null && burnRate > 0 ? (
+              <span>{t("dashboard.weeklyPace.noProjectedDepletion")}</span>
             ) : burnRate == null ? (
               // null burn rate means "too few recent samples to measure",
               // which must read differently from a measured zero burn.
@@ -318,7 +324,7 @@ function RunwayWeeklyCreditsPaceCard({
         </div>
 
         <div className="min-h-5 text-xs">
-          {runsDry && etaHours != null && reliefHours != null ? (
+          {runsDry && etaHours != null && reliefHours != null && etaHours < reliefHours ? (
             <p className="font-medium tabular-nums text-red-600 dark:text-red-400">
               {t("dashboard.weeklyPace.runsDryBeforeRelief", {
                 eta: formatDurationHours(etaHours, t),
@@ -416,7 +422,7 @@ function RunwayWeeklyCreditsPaceCard({
                   </span>
                   <span className="min-w-0 text-right tabular-nums">
                     {t("dashboard.weeklyPace.recommendations.throttleTo", {
-                      percent: formatPercent(throttleToPercent),
+                      percent: `${Math.floor(throttleToPercent * 100) / 100}%`,
                     })}
                   </span>
                 </div>

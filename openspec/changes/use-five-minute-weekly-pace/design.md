@@ -10,3 +10,41 @@ Prove five-minute numerical rates/boundary clipping, both HTTP routes accepting
 5 and rejecting 1, preference migration, real built-browser rendered values and
 rapid/error switching. Qualify a separate immutable build, retain the current
 selected revision as rollback, and verify the normal address after cutover.
+
+## Numerical consistency across resets
+
+Quota history is rounded and sampled. Integrate only continuous, nondecreasing
+intervals within the selected window and divide by their covered elapsed time,
+not by skipped reset/decrease gaps. Retain the existing sparse-data floor
+(minimum of the selected window and thirty minutes). The latest positive-time
+interval must be usable; a pre-reset zero must not masquerade as a measured
+post-reset zero. Exclude future observations and expired-cycle balances rather
+than advancing an old balance into the new week. An expired eligible balance
+makes pool pace unavailable until it is refreshed, not a partial-fleet estimate.
+
+Keep depletionEtaHours as the compatible remaining/rate counterfactual. Derive
+the actual verdict and rendered depletion ETA from the existing reset-aware,
+earliest-expiring-balance simulation, over two longest quota windows. A later
+cohort reset is informational and cannot override earlier material resets.
+Any modeled depletion yields runs_dry; otherwise a minimum pool balance below
+12% is tight. Unknown/zero rates still must not claim measured safety.
+
+When depletion is projected, find a feasible constant load using 32 bounded
+bisection steps through that same monotone simulation. Return the feasible lower
+bound, not the nominal weekly allowance divided by the observed rate. Floor the
+displayed load percentage to avoid rounding above a safe recommendation. This
+reuses the actual balance/refill mechanism instead of introducing a second
+budget model; measure its bounded cost on the real fleet. Pause duration remains
+an estimate for the first modeled gap, not a perpetual safety guarantee.
+
+The card uses projectedDepletionHours when supplied. Explicit null with positive
+burn means no depletion in the modeled horizon; absent metadata from an older
+server retains a clearly labeled no-reset counterfactual. Only say relief
+arrives after depletion when the actual timestamps have that ordering. Preserve
+rounded-percentage warnings and unavailable/observed-zero distinction.
+
+Acceptance includes independent constant-slope reset-gap examples; an exhausted
+old cycle; unsafe nominal throttling; earlier non-cohort relief; depletion after
+the first reset; rendered feasible load/ETA; same-time raw live history replay;
+both HTTP routes and real MariaDB; bounded actual built-browser and native
+continuation qualification before guarded immutable deployment.

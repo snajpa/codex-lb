@@ -879,6 +879,8 @@
   "dashboard.weeklyPace.reliefLine": "next reset in {{duration}} · returns ~{{credits}} credits",
   "dashboard.weeklyPace.resetTickTooltip": "+{{credits}} credits at {{time}}",
   "dashboard.weeklyPace.runsDryBeforeRelief": "relief in {{relief}} — arrives after depletion",
+  "dashboard.weeklyPace.withoutResets": "without resets: ~{{duration}} left",
+  "dashboard.weeklyPace.noProjectedDepletion": "No depletion projected over two quota windows",
   "dashboard.weeklyPace.runsOutIn": "runs out in ~{{duration}}",
   "dashboard.weeklyPace.saturatedFloor": "All accounts saturated — demand figures are at-least floors",
   "dashboard.weeklyPace.scheduledByNow": "Scheduled by now",

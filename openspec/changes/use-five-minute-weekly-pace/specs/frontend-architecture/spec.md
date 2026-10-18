@@ -27,3 +27,9 @@ recommendations together without changing other dashboard timeframes or settings
 - **WHEN** the browser has a persisted one-minute averaging selection
 - **THEN** the dashboard MUST select and persist five minutes instead
 - **AND** an unset preference MUST still default to three hours
+
+#### Scenario: Reset-aware depletion versus a counterfactual
+- **WHEN** the server supplies reset-aware projection metadata
+- **THEN** the card MUST display that modeled depletion time, or no depletion in the modeled horizon
+- **AND** legacy no-reset ETAs MUST be explicitly qualified when projection metadata is absent
+- **AND** any displayed recommended load MUST be rounded down, never above the feasible load

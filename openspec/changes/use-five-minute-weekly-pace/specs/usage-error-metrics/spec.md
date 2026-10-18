@@ -37,3 +37,38 @@ simulation and rate-dependent recommendations.
 - **WHEN** a client uses the retired one-minute interval
 - **THEN** the HTTP query MUST be rejected with 422
 - **AND** a persisted browser preference of 1 MUST migrate to 5 minutes
+
+#### Scenario: Skipped reset gaps are not zero consumption
+- **WHEN** a discontinuous history interval is excluded from its quota delta
+- **THEN** its duration MUST also be excluded from measured coverage
+- **AND** the existing selected-window sparse-data floor MUST still apply
+- **AND** an unusable latest interval MUST produce unknown rather than a pre-reset zero
+
+## ADDED Requirements
+
+### Requirement: Reset-aware weekly runway and feasible load
+The weekly pace verdict and actual depletion display MUST use the selected burn
+rate and all eligible balances and resets over two longest quota windows.
+`depletionEtaHours` MUST remain the no-reset remaining/rate counterfactual for
+compatibility. `projectedDepletionHours` MUST represent actual modeled depletion.
+A throttle recommendation MUST be feasible through that same model horizon,
+with a conservatively rounded display, not merely equal to nominal weekly supply.
+
+#### Scenario: Remaining credits constrain throttling
+- **GIVEN** 5040 credits remain, the next refill is in 100 hours, and burn is 1008 credits/hour
+- **WHEN** a load reduction is recommended
+- **THEN** the modeled load MUST NOT exceed 50.4 credits/hour or 5 percent of current load
+
+#### Scenario: Earlier relief outside the saturated cohort
+- **GIVEN** a less-saturated account refills before the saturated cohort
+- **WHEN** those earlier credits prevent modeled depletion
+- **THEN** the verdict MUST NOT claim the pool runs dry before relief
+
+#### Scenario: Depletion after an early reset
+- **WHEN** the first reset arrives before the no-reset ETA but the pool depletes later in the horizon
+- **THEN** the verdict MUST report runs dry and the card MUST show that later modeled depletion
+- **AND** it MUST NOT say the first relief arrives after depletion
+
+#### Scenario: Expired and future quota observations
+- **WHEN** an eligible balance belongs to an already elapsed reset cycle or a future observation
+- **THEN** complete-fleet pace MUST be unavailable rather than advancing that balance into a new cycle

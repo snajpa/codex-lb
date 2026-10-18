@@ -879,6 +879,8 @@
   "dashboard.weeklyPace.reliefLine": "다음 리셋 {{duration}} 후 · ~{{credits}} 크레딧 복구",
   "dashboard.weeklyPace.resetTickTooltip": "{{time}} 리셋 · +{{credits}} 크레딧",
   "dashboard.weeklyPace.runsDryBeforeRelief": "다음 리셋은 {{relief}} 후 — 고갈보다 늦게 도착",
+  "dashboard.weeklyPace.withoutResets": "리셋 제외: 약 {{duration}} 남음",
+  "dashboard.weeklyPace.noProjectedDepletion": "두 할당량 주기 내 고갈 예상 없음",
   "dashboard.weeklyPace.runsOutIn": "~{{duration}} 후 소진",
   "dashboard.weeklyPace.saturatedFloor": "모든 계정 포화 — 수요 수치는 최소치",
   "dashboard.weeklyPace.scheduledByNow": "현재까지 계획",

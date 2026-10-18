@@ -20,5 +20,17 @@ optional integer query parameter `burnWindowMinutes=5|15|60|180`; omission
 retains 180 minutes. The weekly credit response echoes `burnWindowMinutes` so
 consumers can distinguish responses from different averaging windows.
 
-Normative contracts: [frontend architecture](../openspec/specs/frontend-architecture/spec.md)
-and [usage metrics](../openspec/specs/usage-error-metrics/spec.md).
+Normative contracts: [frontend architecture](https://github.com/snajpa/codex-lb/blob/main/openspec/specs/frontend-architecture/spec.md)
+and [usage metrics](https://github.com/snajpa/codex-lb/blob/main/openspec/specs/usage-error-metrics/spec.md).
+
+The reset-aware runway projects depletion using current balances and all weekly
+refills over two longest quota windows. “Safe” means no depletion in that modeled
+horizon at the selected observed rate, not a guarantee of future traffic. The
+recommended load is a feasible constant fraction of that rate through the same
+horizon, rounded down for display. It is not simply the nominal weekly allowance.
+An expired-cycle balance remains unavailable until refreshed after reset.
+
+For API compatibility, `depletionEtaHours` remains remaining credits divided by
+observed burn without resets. The card uses `projectedDepletionHours` instead;
+explicit null with positive measured burn means no modeled depletion. Older
+responses without this field show a qualified “without resets” estimate.

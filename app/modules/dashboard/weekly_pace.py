@@ -25,7 +25,6 @@ DEMAND_WINDOW = timedelta(days=7)
 RELIEF_COHORT_USED_PERCENT = 95.0
 RELIEF_CLUSTER_WINDOW = timedelta(hours=1)
 SATURATED_USED_PERCENT = 99.5
-TIGHT_MARGIN_HOURS = 24.0
 TIGHT_HEADROOM_PERCENT = 12.0
 MIN_FRESHNESS_SECONDS = 300.0
 FRESHNESS_MISSED_REFRESH_CYCLES = 3.0
@@ -116,6 +115,14 @@ def build_weekly_credit_pace(
             rows = secondary_history.get(summary.account_id, [])
             if any(row.recorded_at >= freshness_cutoff for row in rows):
                 return None
+        if account is not None and account.status in PACE_ELIGIBLE_ACCOUNT_STATUSES:
+            rows = secondary_history.get(summary.account_id, [])
+            # Neither an old cycle's balance nor a future snapshot is current headroom.
+            if any(row.recorded_at > now for row in rows) or (
+                summary.reset_at_secondary is not None
+                and naive_utc_to_epoch(summary.reset_at_secondary) * 1000.0 <= now_ms
+            ):
+                return None
         timing = _weekly_timing(summary, now_ms)
         if timing is None:
             continue
@@ -195,11 +202,8 @@ def build_weekly_credit_pace(
         else None
     )
     throttle_to_percent = (
-        _clamp((scheduled_burn_rate_credits_per_hour / forecast_rate) * 100.0, 0.0, 100.0)
-        if forecast_rate is not None
-        and forecast_rate > 0
-        and scheduled_burn_rate_credits_per_hour > 0
-        and projected_shortfall_credits > 0
+        _feasible_load_percent(pace_accounts, now_ms, forecast_rate)
+        if forecast_rate is not None and forecast_rate > 0 and projected_shortfall_credits > 0
         else None
     )
     reduce_by_percent = 100.0 - throttle_to_percent if throttle_to_percent is not None else None
@@ -216,9 +220,8 @@ def build_weekly_credit_pace(
     )
     next_relief_in_hours, next_relief_credits = _next_relief(pace_accounts, now_ms)
     runway_status = _runway_status(
-        depletion_eta_hours=depletion_eta_hours,
-        next_relief_in_hours=next_relief_in_hours,
-        headroom_percent=headroom_percent,
+        projection=projection,
+        total_full_credits=total_full_credits,
     )
     saturated_account_count = sum(_used_percent(account) >= SATURATED_USED_PERCENT for account in pace_accounts)
     add_pro_accounts = None
@@ -305,17 +308,10 @@ def _reset_events(accounts: list[_PaceAccount], now_ms: float) -> list[WeeklyCre
     ]
 
 
-def _runway_status(
-    *,
-    depletion_eta_hours: float | None,
-    next_relief_in_hours: float,
-    headroom_percent: float,
-) -> WeeklyCreditRunwayStatus:
-    if depletion_eta_hours is not None and depletion_eta_hours < next_relief_in_hours:
+def _runway_status(*, projection: _Projection, total_full_credits: float) -> WeeklyCreditRunwayStatus:
+    if projection.projected_depletion_hours is not None:
         return "runs_dry"
-    if (
-        depletion_eta_hours is not None and depletion_eta_hours - next_relief_in_hours < TIGHT_MARGIN_HOURS
-    ) or headroom_percent < TIGHT_HEADROOM_PERCENT:
+    if projection.projected_minimum_remaining_credits / total_full_credits * 100.0 < TIGHT_HEADROOM_PERCENT:
         return "tight"
     return "safe"
 
@@ -377,11 +373,9 @@ def _recent_burn_rate_credits_per_hour(
     recent = observed[start:]
     if len(recent) < 2:
         return None
-    span_seconds = (recent[-1].recorded_at - max(window_start, recent[0].recorded_at)).total_seconds()
-    if span_seconds <= 0:
-        return None
     used_percent = 0.0
-    has_usable_interval = False
+    covered_seconds = 0.0
+    latest_interval_usable = False
     for previous, current in zip(recent, recent[1:]):
         seconds = (current.recorded_at - previous.recorded_at).total_seconds()
         overlap = (current.recorded_at - max(window_start, previous.recorded_at)).total_seconds()
@@ -392,12 +386,15 @@ def _recent_burn_rate_credits_per_hour(
             and abs(current.reset_at - previous.reset_at) > 60
         )
         delta = current.used_percent - previous.used_percent
-        if seconds > 0 and overlap > 0 and not window_changed and not reset_changed and delta >= 0:
-            has_usable_interval = True
+        if seconds <= 0 or overlap <= 0:
+            continue
+        latest_interval_usable = not window_changed and not reset_changed and isfinite(delta) and delta >= 0
+        if latest_interval_usable:
+            covered_seconds += overlap
             used_percent += delta * overlap / seconds
-    if not has_usable_interval:
+    if not latest_interval_usable or covered_seconds <= 0:
         return None
-    denominator = max(min(window_minutes * 60.0, 1800.0), span_seconds)
+    denominator = max(min(window_minutes * 60.0, 1800.0), covered_seconds)
     return used_percent * full_credits * 36.0 / denominator
 
 
@@ -496,6 +493,19 @@ def _project_weekly_pool(
         projected_depletion_hours=None,
         projected_minimum_remaining_credits=minimum_remaining,
     )
+
+
+def _feasible_load_percent(accounts: list[_PaceAccount], now_ms: float, observed_rate: float) -> float:
+    # Feasibility is monotone in burn. Keep the lower bound safe even when the
+    # remaining pool cannot sustain its nominal full-week replacement rate.
+    lower, upper = 0.0, observed_rate
+    for _ in range(32):
+        trial = (lower + upper) / 2.0
+        if _project_weekly_pool(accounts, now_ms, trial).projected_depletion_hours is None:
+            lower = trial
+        else:
+            upper = trial
+    return lower / observed_rate * 100.0
 
 
 def _consume_balance(accounts: list[_SimulationAccount], amount_credits: float) -> None:
