@@ -48,7 +48,7 @@ async def main() -> None:
                 )
             else:
                 account.last_refresh = now
-            for minutes, used in [(180, 10.0), (60, 11.0), (15, 12.0), (1, 13.0), (0, 14.0)]:
+            for minutes, used in [(180, 10.0), (60, 11.0), (15, 12.0), (5, 13.0), (0, 14.0)]:
                 await usage.add_entry(
                     account_id,
                     used + index,

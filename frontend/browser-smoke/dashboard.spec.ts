@@ -615,7 +615,7 @@ test("weekly pace switches all averaging windows against the real backend", asyn
   const initialResponse = await initialProjection;
   const controls = page.getByRole("group", { name: "Average over" });
   await expect(controls.getByRole("button", { name: "3 h", exact: true })).toHaveAttribute("aria-pressed", "true");
-  for (const [label, minutes] of [["1 min", 1], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
+  for (const [label, minutes] of [["5 min", 5], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
     const received = minutes === 180 ? Promise.resolve(initialResponse) : page.waitForResponse(response => {
       const url = new URL(response.url());
       return url.pathname === "/api/dashboard/projections" && Number(url.searchParams.get("burnWindowMinutes") ?? 180) === minutes;
@@ -633,7 +633,7 @@ test("weekly pace switches all averaging windows against the real backend", asyn
   await expect(controls.getByRole("button", { name: "15 min", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.setViewportSize({ width: 390, height: 844 });
   await controls.scrollIntoViewIfNeeded();
-  for (const label of ["1 min", "15 min", "1 h", "3 h"]) {
+  for (const label of ["5 min", "15 min", "1 h", "3 h"]) {
     await expect(controls.getByRole("button", { name: label, exact: true })).toBeInViewport();
   }
   const directory = process.env.DASHBOARD_SCREENSHOT_OUTPUT_DIR;
@@ -647,13 +647,13 @@ test("weekly pace ignores late windows and keeps controls usable after an error"
   let started!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const requested = new Promise<void>(resolve => { started = resolve; });
-  await page.route("**/api/dashboard/projections?burnWindowMinutes=1", async route => {
+  await page.route("**/api/dashboard/projections?burnWindowMinutes=5", async route => {
     const response = await route.fetch();
     started();
     await held;
     await route.fulfill({ response });
   });
-  await controls.getByRole("button", { name: "1 min", exact: true }).click();
+  await controls.getByRole("button", { name: "5 min", exact: true }).click();
   await requested;
   const oneHour = page.waitForResponse(response => response.url().endsWith("/api/dashboard/projections?burnWindowMinutes=60"));
   await controls.getByRole("button", { name: "1 h", exact: true }).click();

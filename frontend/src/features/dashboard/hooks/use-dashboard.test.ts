@@ -106,7 +106,7 @@ describe("useDashboard", () => {
     server.use(http.get("/api/dashboard/projections", async ({ request }) => {
       const minutes = Number(new URL(request.url).searchParams.get("burnWindowMinutes") ?? 180);
       requested.push(minutes);
-      if (minutes === 1) await shortResponse;
+      if (minutes === 5) await shortResponse;
       return HttpResponse.json({ ...createDashboardProjections(), quotaBurn: [],
         depletionPrimary: { risk: minutes, riskLevel: "safe", burnRate: minutes,
           safeUsagePercent: 50, projectedExhaustionAt: null, secondsUntilExhaustion: null } });
@@ -115,20 +115,20 @@ describe("useDashboard", () => {
     queryClient.setQueryDefaults(["dashboard", "projections"], { gcTime: Infinity });
     const { result, rerender } = renderHook(
       ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
-      { wrapper: createWrapper(queryClient), initialProps: { minutes: 1 as WeeklyPaceWindowMinutes } },
+      { wrapper: createWrapper(queryClient), initialProps: { minutes: 5 as WeeklyPaceWindowMinutes } },
     );
-    await waitFor(() => expect(requested).toContain(1));
+    await waitFor(() => expect(requested).toContain(5));
     rerender({ minutes: 15 });
     await waitFor(() => expect(result.current.data?.depletionPrimary?.burnRate).toBe(15));
     releaseShort();
-    await waitFor(() => expect(queryClient.getQueryData(["dashboard", "projections", 1])).toBeDefined());
+    await waitFor(() => expect(queryClient.getQueryData(["dashboard", "projections", 5])).toBeDefined());
     expect(result.current.data?.depletionPrimary?.burnRate).toBe(15);
-    expect(requested).toEqual([1, 15]);
+    expect(requested).toEqual([5, 15]);
   });
 
   it("does not retain another window's result when the selected request fails", async () => {
     server.use(http.get("/api/dashboard/projections", ({ request }) => {
-      return new URL(request.url).searchParams.get("burnWindowMinutes") === "1"
+      return new URL(request.url).searchParams.get("burnWindowMinutes") === "5"
         ? HttpResponse.json({ error: { code: "failed", message: "unavailable" } }, { status: 503 })
         : HttpResponse.json(createDashboardProjections());
     }));
@@ -138,7 +138,7 @@ describe("useDashboard", () => {
       { wrapper: createWrapper(queryClient), initialProps: { minutes: 180 as WeeklyPaceWindowMinutes } },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    rerender({ minutes: 1 });
+    rerender({ minutes: 5 });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
   });

@@ -469,7 +469,7 @@ describe("weekly pace averaging controls", () => {
   it("offers all four windows and passes the selected minutes", () => {
     const onChange = vi.fn();
     render(<WeeklyCreditsPaceCard pace={BASE_PACE} onBurnWindowChange={onChange} />);
-    for (const [label, minutes] of [["1 min", 1], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
+    for (const [label, minutes] of [["5 min", 5], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
       const button = screen.getByRole("button", { name: label });
       expect(button).toHaveAttribute("aria-pressed", String(minutes === 180));
       fireEvent.click(button);
@@ -478,8 +478,8 @@ describe("weekly pace averaging controls", () => {
   });
 
   it("keeps controls during loading and never relabels old-window values", () => {
-    render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={1} onBurnWindowChange={vi.fn()} isLoading />);
-    expect(screen.getByRole("button", { name: "1 min" })).toHaveAttribute("aria-pressed", "true");
+    render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={5} onBurnWindowChange={vi.fn()} isLoading />);
+    expect(screen.getByRole("button", { name: "5 min" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByText("50%")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Loading the selected averaging window");
     expect(screen.getByText(/Quota percentages are rounded/)).toBeInTheDocument();
@@ -493,10 +493,10 @@ describe("weekly pace averaging controls", () => {
   });
 
   it("does not call a rounded zero a measured safe runway", () => {
-    render(<WeeklyCreditsPaceCard pace={{ ...BASE_PACE, burnWindowMinutes: 1,
+    render(<WeeklyCreditsPaceCard pace={{ ...BASE_PACE, burnWindowMinutes: 5,
       runwayStatus: "safe", headroomPercent: 50, headroomCredits: 500000,
       burnRateRecentCreditsPerHour: 0, depletionEtaHours: null }}
-      burnWindowMinutes={1} onBurnWindowChange={vi.fn()} />);
+      burnWindowMinutes={5} onBurnWindowChange={vi.fn()} />);
     expect(screen.getByTestId("weekly-runway-verdict")).toHaveTextContent("No quota change observed");
     expect(screen.queryByText("Safe until reset")).not.toBeInTheDocument();
   });

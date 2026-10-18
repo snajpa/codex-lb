@@ -526,14 +526,14 @@ def test_weekly_pace_is_unchanged_by_ewma_tail_cap_under_fleet_burn_floor() -> N
     _assert_close(tail_pace.model_dump(), full_pace.model_dump())
 
 
-@pytest.mark.parametrize(("minutes", "expected_rate"), [(1, 30240), (15, 4032), (60, 1512), (180, 672)])
+@pytest.mark.parametrize(("minutes", "expected_rate"), [(5, 6048), (15, 4032), (60, 1512), (180, 672)])
 def test_selected_window_drives_displayed_burn_and_forecast(
     minutes: WeeklyPaceWindowMinutes, expected_rate: float
 ) -> None:
     account_id = "selected-window"
     rows = [
         _row(account_id, used, NOW - timedelta(minutes=offset))
-        for offset, used in [(180, 10), (60, 11), (15, 12), (1, 13), (0, 14)]
+        for offset, used in [(180, 10), (60, 11), (15, 12), (5, 13), (0, 14)]
     ]
     pace = _build(
         [_summary(account_id, used_percent=14, reset_in_hours=145)], {account_id: rows}, burn_window_minutes=minutes
@@ -563,13 +563,13 @@ def test_repeated_unchanged_snapshots_do_not_decay_forecast() -> None:
     assert dense_pace.forecast_burn_rate_credits_per_hour == dense_pace.burn_rate_recent_credits_per_hour
 
 
-def test_one_minute_clips_boundary_interval_without_thirty_minute_dilution() -> None:
+def test_five_minute_clips_boundary_interval_without_thirty_minute_dilution() -> None:
     account_id = "boundary-window"
-    rows = [_row(account_id, 10, NOW - timedelta(minutes=2)), _row(account_id, 12, NOW)]
+    rows = [_row(account_id, 10, NOW - timedelta(minutes=10)), _row(account_id, 12, NOW)]
     pace = _build(
-        [_summary(account_id, used_percent=12, reset_in_hours=145)], {account_id: rows}, burn_window_minutes=1
+        [_summary(account_id, used_percent=12, reset_in_hours=145)], {account_id: rows}, burn_window_minutes=5
     )
-    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(30240)
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(6048)
 
 
 def test_incomplete_pool_observations_do_not_report_partial_fleet_burn() -> None:
@@ -578,7 +578,7 @@ def test_incomplete_pool_observations_do_not_report_partial_fleet_burn() -> None
         "covered": [_row("covered", 10, NOW - timedelta(minutes=1)), _row("covered", 14, NOW)],
         "missing": [_row("missing", 14, NOW)],
     }
-    pace = _build(summaries, histories, burn_window_minutes=1)
+    pace = _build(summaries, histories, burn_window_minutes=5)
     assert pace.burn_rate_recent_credits_per_hour is None
     assert pace.forecast_burn_rate_credits_per_hour is None
     assert pace.depletion_eta_hours is None
@@ -599,7 +599,7 @@ def test_quota_discontinuities_do_not_create_burn(change: str) -> None:
     pace = _build(
         [_summary(account_id, used_percent=current.used_percent, reset_in_hours=145)],
         {account_id: [previous, current]},
-        burn_window_minutes=1,
+        burn_window_minutes=5,
     )
     assert pace.burn_rate_recent_credits_per_hour is None
     assert pace.forecast_burn_rate_credits_per_hour is None
@@ -613,9 +613,9 @@ def test_reset_countdown_jitter_does_not_hide_real_burn() -> None:
     pace = _build(
         [_summary(account_id, used_percent=11, reset_in_hours=145)],
         {account_id: [previous, current]},
-        burn_window_minutes=1,
+        burn_window_minutes=5,
     )
-    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(30240)
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(6048)
 
 
 @pytest.mark.parametrize("change", ["decrease", "reset", "duration"])
@@ -635,7 +635,7 @@ def test_discontinuous_account_prevents_partial_fleet_forecast(change: str) -> N
             "covered": [_row("covered", 10, NOW - timedelta(minutes=1)), _row("covered", 14, NOW)],
             "discontinuous": [previous, current],
         },
-        burn_window_minutes=1,
+        burn_window_minutes=5,
     )
     assert pace.burn_rate_recent_credits_per_hour is None
     assert pace.forecast_burn_rate_credits_per_hour is None
@@ -650,7 +650,7 @@ def test_stable_unchanged_interval_remains_measured_zero() -> None:
         {
             account_id: [_row(account_id, 14, NOW - timedelta(minutes=1)), _row(account_id, 14, NOW)],
         },
-        burn_window_minutes=1,
+        burn_window_minutes=5,
     )
     assert pace.burn_rate_recent_credits_per_hour == 0
     assert pace.forecast_burn_rate_credits_per_hour == 0

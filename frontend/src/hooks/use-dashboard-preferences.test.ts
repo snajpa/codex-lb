@@ -117,14 +117,23 @@ describe("useDashboardPreferencesStore", () => {
 });
 
 describe("weekly pace window preference", () => {
+  it("migrates a stored one-minute selection to five minutes", async () => {
+    installLocalStorageMock();
+    window.localStorage.setItem("codex-lb-weekly-pace-window-minutes", "1");
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+    useDashboardPreferencesStore.getState().initializePreferences();
+    expect(useDashboardPreferencesStore.getState().weeklyPaceWindowMinutes).toBe(5);
+    expect(window.localStorage.getItem("codex-lb-weekly-pace-window-minutes")).toBe("5");
+  });
+
   it("defaults to three hours and restores each supported window", async () => {
     installLocalStorageMock();
     const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
-    for (const value of ["invalid", "0", "30", "180", "1", "15", "60"]) {
+    for (const value of ["invalid", "0", "30", "180", "5", "15", "60"]) {
       window.localStorage.setItem("codex-lb-weekly-pace-window-minutes", value);
       useDashboardPreferencesStore.getState().initializePreferences();
       expect(useDashboardPreferencesStore.getState().weeklyPaceWindowMinutes)
-        .toBe(["1", "15", "60"].includes(value) ? Number(value) : 180);
+        .toBe(["5", "15", "60"].includes(value) ? Number(value) : 180);
     }
     useDashboardPreferencesStore.getState().setWeeklyPaceWindowMinutes(15);
     expect(window.localStorage.getItem("codex-lb-weekly-pace-window-minutes")).toBe("15");

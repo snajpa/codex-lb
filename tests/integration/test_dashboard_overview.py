@@ -1677,7 +1677,7 @@ async def test_dashboard_overview_exposes_zero_previous_window_totals_when_full_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["overview", "projections"])
-@pytest.mark.parametrize(("minutes", "expected_rate"), [(1, 30240), (15, 4032), (60, 1512), (180, 672)])
+@pytest.mark.parametrize(("minutes", "expected_rate"), [(5, 6048), (15, 4032), (60, 1512), (180, 672)])
 async def test_dashboard_selected_burn_window_contract(
     async_client, db_setup, monkeypatch, route, minutes, expected_rate
 ):
@@ -1686,7 +1686,7 @@ async def test_dashboard_selected_burn_window_contract(
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(_make_account("window-api", "window@example.com", plan_type="pro"))
         repo = UsageRepository(session)
-        for offset, used in [(180, 10), (60, 11), (15, 12), (1, 13), (0, 14)]:
+        for offset, used in [(180, 10), (60, 11), (15, 12), (5, 13), (0, 14)]:
             await repo.add_entry(
                 "window-api",
                 used,
@@ -1706,7 +1706,7 @@ async def test_dashboard_selected_burn_window_contract(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["overview", "projections"])
-@pytest.mark.parametrize("minutes", ["0", "5", "30", "181", "1.5", "invalid"])
+@pytest.mark.parametrize("minutes", ["0", "1", "30", "181", "1.5", "invalid"])
 async def test_dashboard_rejects_unsupported_burn_window(async_client, db_setup, route, minutes):
     response = await async_client.get(f"/api/dashboard/{route}", params={"burnWindowMinutes": minutes})
     assert response.status_code == 422

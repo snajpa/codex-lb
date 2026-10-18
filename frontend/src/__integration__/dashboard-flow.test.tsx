@@ -96,7 +96,7 @@ describe("dashboard flow integration", () => {
     expect(screen.queryByTestId("usage-allowance-unknown") !== null).toBe(!mixed);
   });
 
-  it.each([1, 15, 60, 180] as const)("keeps an unavailable overview unknown with retained %s-minute projections", async (minutes) => {
+  it.each([5, 15, 60, 180] as const)("keeps an unavailable overview unknown with retained %s-minute projections", async (minutes) => {
     useDashboardPreferencesStore.setState({ weeklyPaceWindowMinutes: minutes });
     const account = createAccountSummary({
       resetAtSecondary: new Date(Date.now() + 3 * 86_400_000).toISOString(),
