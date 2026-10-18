@@ -17,3 +17,8 @@ recommendations together without changing other dashboard timeframes or settings
 - **THEN** the card MUST distinguish no observed change from unavailable data
 - **AND** MUST NOT claim a measured safe runway
 - **AND** MUST explain rounded quota percentages make short windows noisy
+
+#### Scenario: The server cannot measure weekly pace
+- **WHEN** the current overview explicitly reports unavailable pace
+- **THEN** the default selectable card MUST preserve that unavailable state
+- **AND** MUST NOT substitute a cumulative-week local estimate or retained projection under the 3 h label

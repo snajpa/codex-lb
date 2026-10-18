@@ -381,6 +381,7 @@ def _recent_burn_rate_credits_per_hour(
     if span_seconds <= 0:
         return None
     used_percent = 0.0
+    has_usable_interval = False
     for previous, current in zip(recent, recent[1:]):
         seconds = (current.recorded_at - previous.recorded_at).total_seconds()
         overlap = (current.recorded_at - max(window_start, previous.recorded_at)).total_seconds()
@@ -390,8 +391,12 @@ def _recent_burn_rate_credits_per_hour(
             and current.reset_at is not None
             and abs(current.reset_at - previous.reset_at) > 60
         )
-        if seconds > 0 and overlap > 0 and not window_changed and not reset_changed:
-            used_percent += max(0.0, current.used_percent - previous.used_percent) * overlap / seconds
+        delta = current.used_percent - previous.used_percent
+        if seconds > 0 and overlap > 0 and not window_changed and not reset_changed and delta >= 0:
+            has_usable_interval = True
+            used_percent += delta * overlap / seconds
+    if not has_usable_interval:
+        return None
     denominator = max(min(window_minutes * 60.0, 1800.0), span_seconds)
     return used_percent * full_credits * 36.0 / denominator
 

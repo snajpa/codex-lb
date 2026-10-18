@@ -23,3 +23,8 @@ simulation and rate-dependent recommendations.
 - **THEN** pool burn MUST be unknown rather than a partial-fleet estimate
 - **AND** quota decreases, real reset discontinuities and changed window
   durations MUST NOT create artificial burn
+
+#### Scenario: Only discontinuous intervals are available
+- **WHEN** every observed interval crosses a quota decrease, real reset or duration change
+- **THEN** that account's rate and the complete-fleet rate MUST be unknown, not measured zero
+- **AND** no depletion ETA or rate-dependent recommendation may use a partial-fleet rate
