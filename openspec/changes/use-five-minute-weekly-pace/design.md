@@ -82,3 +82,10 @@ actual built-browser behavior. Measure real endpoint cost before deployment.
 Start the eager projections read when dashboard authentication is initialized,
 in parallel with overview rather than waiting for the overview response. The
 overview still controls whether weekly quota coverage is available for display.
+
+Concurrent overview/projection startup can race the trailing-demand cache fill.
+Use a weak per-event-loop, per-signature lock around cache misses, recheck after
+acquisition, and run the owning request's database read inline. Idle locks drop
+automatically; cancellation/failure releases the lock without caching partial
+results. Keep TTL-disabled exact reads independent and avoid background tasks
+that could outlive their request-scoped database session.

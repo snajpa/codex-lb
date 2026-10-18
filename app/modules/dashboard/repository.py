@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from weakref import WeakValueDictionary
 
 from sqlalchemy import case, func, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +41,9 @@ _TRAILING_DEMAND_MAX_ENTRIES = 16
 # (window span in whole seconds, sorted account -> window pairs)
 _TrailingDemandKey = tuple[int, tuple[tuple[str, NormalizedUsageWindow], ...]]
 _trailing_demand_cache: dict[_TrailingDemandKey, tuple[dict[str, float], float]] = {}
+_trailing_demand_locks: WeakValueDictionary[tuple[asyncio.AbstractEventLoop, _TrailingDemandKey], asyncio.Lock] = (
+    WeakValueDictionary()
+)
 
 
 def _clear_trailing_demand_cache() -> None:
@@ -145,18 +150,30 @@ class DashboardRepository:
             round((until - since).total_seconds()),
             tuple(sorted(account_windows.items())),
         )
-        if ttl_seconds > 0:
+        if ttl_seconds <= 0:
+            return dict(
+                await self._usage_repo.positive_used_percent_deltas_by_account(
+                    account_windows,
+                    since=since,
+                    until=until,
+                )
+            )
+        cached = _cached_trailing_demand(cache_key)
+        if cached is not None:
+            return dict(cached)
+        lock_key = (asyncio.get_running_loop(), cache_key)
+        lock = _trailing_demand_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
             cached = _cached_trailing_demand(cache_key)
             if cached is not None:
                 return dict(cached)
-        deltas = await self._usage_repo.positive_used_percent_deltas_by_account(
-            account_windows,
-            since=since,
-            until=until,
-        )
-        if ttl_seconds > 0:
+            deltas = await self._usage_repo.positive_used_percent_deltas_by_account(
+                account_windows,
+                since=since,
+                until=until,
+            )
             _store_trailing_demand(cache_key, deltas, ttl_seconds)
-        return dict(deltas)
+            return dict(deltas)
 
     async def aggregate_logs_by_bucket(
         self,
