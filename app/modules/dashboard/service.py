@@ -29,7 +29,12 @@ from app.modules.dashboard.schemas import (
     WeeklyPaceWindowMinutes,
 )
 from app.modules.dashboard.spend_projection import build_spend_projection
-from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, FLEET_BURN_WINDOW, build_weekly_credit_pace
+from app.modules.dashboard.weekly_pace import (
+    DEMAND_WINDOW,
+    FLEET_BURN_WINDOW,
+    WEEKLY_PACE_WINDOWS,
+    build_weekly_credit_pace,
+)
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -276,19 +281,28 @@ class DashboardService:
             until=now,
         )
         pace_now = utcnow()
-        weekly_credit_pace = build_weekly_credit_pace(
-            accounts=accounts,
-            account_summaries=account_summaries,
-            secondary_history=secondary_history,
-            now=pace_now,
-            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
-            trailing_demand_used_percent_by_account=trailing_demand,
-            working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
-            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
-            burn_window_minutes=burn_window_minutes,
-        )
+        weekly_credit_pace_windows = {
+            window: build_weekly_credit_pace(
+                accounts=accounts,
+                account_summaries=account_summaries,
+                secondary_history=secondary_history,
+                now=pace_now,
+                usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+                trailing_demand_used_percent_by_account=trailing_demand,
+                working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
+                smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+                burn_window_minutes=window,
+            )
+            for window in WEEKLY_PACE_WINDOWS
+        }
+        weekly_credit_pace = weekly_credit_pace_windows[burn_window_minutes]
         await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
+        if weekly_credit_pace is not None:
+            for pace in weekly_credit_pace_windows.values():
+                if pace is not None:
+                    pace.top_api_keys = weekly_credit_pace.top_api_keys
         return DashboardProjectionsResponse(
+            weekly_credit_pace_windows=weekly_credit_pace_windows,
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,

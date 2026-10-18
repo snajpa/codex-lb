@@ -12,3 +12,8 @@
 - [ ] Align reset-aware verdict, rendered ETA and feasible throttle advice.
 - [ ] Add causal unit/HTTP/rendering regressions and independent replay proof.
 - [ ] Measure projection cost and requalify the immutable delivery end to end.
+
+## Eager averaging values
+- [ ] Compute all four windows from one history/settings/demand read.
+- [ ] Cache the complete projection before selection and switch synchronously.
+- [ ] Verify single-request HTTP/read-count/browser and refresh/error behavior.

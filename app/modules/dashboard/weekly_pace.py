@@ -21,6 +21,7 @@ from app.modules.dashboard.schemas import (
 
 PRO_WEEKLY_CAPACITY_CREDITS = PLAN_CAPACITY_CREDITS_SECONDARY["pro"]
 FLEET_BURN_WINDOW = timedelta(hours=3)
+WEEKLY_PACE_WINDOWS: tuple[WeeklyPaceWindowMinutes, ...] = (5, 15, 60, 180)
 DEMAND_WINDOW = timedelta(days=7)
 RELIEF_COHORT_USED_PERCENT = 95.0
 RELIEF_CLUSTER_WINDOW = timedelta(hours=1)

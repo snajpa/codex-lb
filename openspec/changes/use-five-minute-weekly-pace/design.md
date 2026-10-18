@@ -53,3 +53,28 @@ Take the pace evaluation clock after the asynchronous quota/history reads and
 use it for both weekly pace and percentage-burn generatedAt. A snapshot arriving
 normally after request start is not a future-clock error. Keep the original
 request clock for unrelated activity/timeframe aggregates.
+
+## Eager background values for every averaging button
+
+Load all four rates before selection. Extend the existing projections response
+with a typed four-window pace map, computed from the same quota histories,
+settings and completed-read clock. Read history, demand and API-key attribution
+once; reuse the selected result and attribution instead of repeating database
+queries. Preserve the existing selected weeklyCreditPace response and direct
+burnWindowMinutes query for older clients. No new endpoint, setting or timer.
+
+The dashboard projection query caches this one complete response independently
+of the selected button. A selector exposes the exact chosen map entry, including
+explicit null. Switching after the initial background read must not start a new
+request or enter a selected-window loading state. Initial loading and genuine
+refresh errors remain truthful; interval polling, hidden-tab behavior and cache
+invalidation keep the existing cadence. A change of selection while the shared
+request is pending must select from its result when it arrives, never apply the
+window captured when the request started. Four-window computation adds only
+bounded pure projections, not four full DB history/attribution scans.
+
+Validate a single eager request contains all four independently calculated
+window values at both default and explicit-window projections queries, identical
+read counts and evaluation timestamps, immediate cached switching, selection
+while loading, explicit null/unknown windows, shared refresh/error recovery and
+actual built-browser behavior. Measure real endpoint cost before deployment.

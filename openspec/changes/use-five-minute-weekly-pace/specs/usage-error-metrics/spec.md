@@ -77,3 +77,20 @@ with a conservatively rounded display, not merely equal to nominal weekly supply
 - **WHEN** a valid quota observation is committed after request start but before quota reads finish
 - **THEN** the route MUST evaluate pace against the completed-read clock, not reject ordinary ingestion as future data
 - **AND** percentage-burn generatedAt MUST use that same evaluation instant
+
+
+### Requirement: Eager weekly pace windows share one history read
+Dashboard projections MUST include weeklyCreditPaceWindows keyed by 5, 15, 60
+and 180 minutes. Every entry MUST use the same loaded history, settings, demand
+and evaluation clock; unavailable pace MUST be explicit null. The existing
+weeklyCreditPace MUST remain the requested window's value, defaulting to 180.
+History, trailing demand and API-key attribution MUST NOT be queried per window.
+
+#### Scenario: Default projection eagerly supplies every window
+- **WHEN** a client requests projections without a burnWindowMinutes query
+- **THEN** it MUST receive the values for all four averaging windows
+- **AND** weeklyCreditPace MUST equal the 180-minute map entry
+
+#### Scenario: Explicit query remains compatible
+- **WHEN** a client requests projections for 15 minutes
+- **THEN** weeklyCreditPace MUST equal the 15-minute entry from the same four-window map

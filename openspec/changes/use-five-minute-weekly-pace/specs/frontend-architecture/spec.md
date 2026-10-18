@@ -33,3 +33,11 @@ recommendations together without changing other dashboard timeframes or settings
 - **THEN** the card MUST display that modeled depletion time, or no depletion in the modeled horizon
 - **AND** legacy no-reset ETAs MUST be explicitly qualified when projection metadata is absent
 - **AND** any displayed recommended load MUST be rounded down, never above the feasible load
+
+
+#### Scenario: Every window is ready before its button is clicked
+- **WHEN** the dashboard loads its background projections
+- **THEN** it MUST eagerly cache values for all four averaging windows
+- **AND** selecting an already-loaded window MUST update its values immediately without a new request or loading flash
+- **AND** a selection made while the shared request is pending MUST be honored when it completes
+- **AND** refresh and failure MUST preserve correct window identity and the existing polling/hidden-tab policy

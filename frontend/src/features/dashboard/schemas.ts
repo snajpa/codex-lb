@@ -223,6 +223,12 @@ export const DashboardOverviewSchema = z.object({
 });
 
 export const DashboardProjectionsSchema = z.object({
+  weeklyCreditPaceWindows: z.object({
+    5: WeeklyCreditPaceSchema.nullable(),
+    15: WeeklyCreditPaceSchema.nullable(),
+    60: WeeklyCreditPaceSchema.nullable(),
+    180: WeeklyCreditPaceSchema.nullable(),
+  }).optional(),
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),

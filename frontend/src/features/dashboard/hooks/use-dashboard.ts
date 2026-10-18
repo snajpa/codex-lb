@@ -22,8 +22,16 @@ export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIM
 export function useDashboardProjections(enabled = true, burnWindowMinutes: WeeklyPaceWindowMinutes = 180) {
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
   return useQuery({
-    queryKey: ["dashboard", "projections", burnWindowMinutes],
-    queryFn: () => getDashboardProjections(burnWindowMinutes),
+    queryKey: ["dashboard", "projections", "all-windows"],
+    queryFn: () => getDashboardProjections(),
+    select: (data) => ({
+      ...data,
+      weeklyCreditPace: data.weeklyCreditPaceWindows
+        ? data.weeklyCreditPaceWindows[burnWindowMinutes]
+        : (data.weeklyCreditPace?.burnWindowMinutes ?? 180) === burnWindowMinutes
+          ? data.weeklyCreditPace
+          : null,
+    }),
     enabled,
     refetchInterval: refreshSeconds * 1_000,
     refetchIntervalInBackground: false,

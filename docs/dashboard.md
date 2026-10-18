@@ -34,3 +34,10 @@ For API compatibility, `depletionEtaHours` remains remaining credits divided by
 observed burn without resets. The card uses `projectedDepletionHours` instead;
 explicit null with positive measured burn means no modeled depletion. Older
 responses without this field show a qualified “without resets” estimate.
+
+The dashboard loads all four averaging values in one background projections
+request. Switching buttons then reads the cached entry without another history
+scan or loading state. `weeklyCreditPaceWindows` contains all four keyed values
+from the same evaluation instant; `weeklyCreditPace` remains the selected query
+window for API compatibility. All windows refresh at the existing dashboard
+cadence, and polling still pauses in hidden tabs.

@@ -175,6 +175,9 @@ class DashboardOverviewResponse(DashboardModel):
 
 
 class DashboardProjectionsResponse(DashboardModel):
+    weekly_credit_pace_windows: dict[WeeklyPaceWindowMinutes, WeeklyCreditPaceResponse | None] = Field(
+        default_factory=dict
+    )
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
