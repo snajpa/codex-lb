@@ -126,7 +126,7 @@ const WeeklyCreditRunwayStatusSchema = z.enum(["safe", "tight", "runs_dry"]);
 export type WeeklyPaceWindowMinutes = 5 | 15 | 60 | 180;
 
 const WeeklyCreditPaceSchema = z.object({
-  burnWindowMinutes: z.union([z.literal(1), z.literal(15), z.literal(60), z.literal(180)]).optional(),
+  burnWindowMinutes: z.union([z.literal(5), z.literal(15), z.literal(60), z.literal(180)]).optional(),
   totalFullCredits: z.number(),
   totalActualRemainingCredits: z.number(),
   totalExpectedRemainingCredits: z.number(),

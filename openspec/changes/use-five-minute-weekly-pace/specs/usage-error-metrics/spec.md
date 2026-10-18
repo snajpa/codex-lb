@@ -32,3 +32,8 @@ simulation and rate-dependent recommendations.
 #### Scenario: Retired one-minute HTTP query
 - **WHEN** either dashboard route receives `burnWindowMinutes=1`
 - **THEN** it MUST reject the query with HTTP 422 rather than relabel another interval
+
+#### Scenario: One-minute averaging
+- **WHEN** a client uses the retired one-minute interval
+- **THEN** the HTTP query MUST be rejected with 422
+- **AND** a persisted browser preference of 1 MUST migrate to 5 minutes
