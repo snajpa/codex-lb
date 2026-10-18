@@ -77,6 +77,8 @@ export function DashboardPage() {
   const queryClient = useQueryClient();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
+  const burnWindowMinutes = useDashboardPreferencesStore((s) => s.weeklyPaceWindowMinutes);
+  const setBurnWindowMinutes = useDashboardPreferencesStore((s) => s.setWeeklyPaceWindowMinutes);
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
   const accountListSort = useDashboardPreferencesStore((s) => s.accountListSort);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
@@ -119,7 +121,7 @@ export function DashboardPage() {
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
     useState<OverviewTimeframe | null>(null);
-  const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
+  const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data), burnWindowMinutes);
   const conversationsState = useConversations({
     enabled: canReadConversations && dashboardView === "conversations",
   });
@@ -493,7 +495,15 @@ export function DashboardPage() {
                 unquantifiedAccountCountPrimary={overview?.summary.primaryWindow.unquantifiedAccountCount}
                 unquantifiedAccountCountSecondary={overview?.summary.secondaryWindow?.unquantifiedAccountCount}
               />
-              <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
+              <WeeklyCreditsPaceCard
+                pace={burnWindowMinutes === 180
+                  ? view.weeklyCreditPace
+                  : projectionsQuery.data?.weeklyCreditPace ?? null}
+                burnWindowMinutes={burnWindowMinutes}
+                onBurnWindowChange={setBurnWindowMinutes}
+                isLoading={projectionsQuery.isPending}
+                error={getErrorMessageOrNull(projectionsQuery.error)}
+              />
             </div>
           ) : (
             <UsageDonuts

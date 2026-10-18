@@ -7,7 +7,6 @@ from math import ceil, isfinite
 from typing import Literal
 
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
-from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import AccountSummary
@@ -17,10 +16,10 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditPaceStatus,
     WeeklyCreditResetEvent,
     WeeklyCreditRunwayStatus,
+    WeeklyPaceWindowMinutes,
 )
 
 PRO_WEEKLY_CAPACITY_CREDITS = PLAN_CAPACITY_CREDITS_SECONDARY["pro"]
-RECENT_BURN_WINDOW = timedelta(hours=6)
 FLEET_BURN_WINDOW = timedelta(hours=3)
 DEMAND_WINDOW = timedelta(days=7)
 RELIEF_COHORT_USED_PERCENT = 95.0
@@ -47,7 +46,6 @@ class _PaceAccount:
     remaining_credits: float
     reset_at_ms: float
     window_ms: float
-    forecast_burn_rate_credits_per_hour: float | None
 
 
 @dataclass
@@ -76,6 +74,7 @@ def build_weekly_credit_pace(
     trailing_demand_used_percent_by_account: Mapping[str, float] | None = None,
     working_days: set[int] | None = None,
     smoothing_window_minutes: int = 30,
+    burn_window_minutes: WeeklyPaceWindowMinutes = 180,
 ) -> WeeklyCreditPaceResponse | None:
     """Build server-side weekly quota pace from active, fresh weekly usage rows.
 
@@ -139,7 +138,7 @@ def build_weekly_credit_pace(
             working_days=working_days,
         )
         expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
-        account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
+        account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now, burn_window_minutes)
         smoothed_remaining_credits = _smoothed_remaining_credits(
             rows=rows,
             full_credits=full_credits,
@@ -168,7 +167,6 @@ def build_weekly_credit_pace(
                 remaining_credits=actual_remaining_credits,
                 reset_at_ms=effective_reset_at_ms,
                 window_ms=window_ms,
-                forecast_burn_rate_credits_per_hour=account_rate,
             )
         )
 
@@ -183,7 +181,7 @@ def build_weekly_credit_pace(
     smoothed_delta_percent = smoothed_used_percent - scheduled_used_percent
     smoothed_schedule_gap_credits = max(0.0, total_expected_remaining_credits - total_smoothed_remaining_credits)
 
-    forecast_rate = forecast_burn_rate_credits_per_hour if rate_sample_count > 0 else None
+    forecast_rate = forecast_burn_rate_credits_per_hour if rate_sample_count == len(pace_accounts) else None
     projection = _project_weekly_pool(pace_accounts, now_ms, forecast_rate)
     projected_shortfall_credits = projection.projected_shortfall_credits
     pace_multiplier = (
@@ -212,11 +210,7 @@ def build_weekly_credit_pace(
 
     headroom_credits = total_actual_remaining_credits
     headroom_percent = 100.0 * headroom_credits / total_full_credits
-    recent_burn_rate = _fleet_recent_burn_rate_credits_per_hour(
-        pace_accounts,
-        secondary_history,
-        now,
-    )
+    recent_burn_rate = forecast_rate
     depletion_eta_hours = (
         headroom_credits / recent_burn_rate if recent_burn_rate is not None and recent_burn_rate > 0 else None
     )
@@ -242,6 +236,7 @@ def build_weekly_credit_pace(
             add_pro_accounts = ceil(demand_surplus_accounts)
 
     return WeeklyCreditPaceResponse(
+        burn_window_minutes=burn_window_minutes,
         total_full_credits=total_full_credits,
         total_actual_remaining_credits=total_actual_remaining_credits,
         total_expected_remaining_credits=total_expected_remaining_credits,
@@ -281,36 +276,6 @@ def build_weekly_credit_pace(
         inactive_account_count=inactive_account_count,
         confidence=_confidence(len(pace_accounts), rate_sample_count, stale_account_count),
     )
-
-
-def _fleet_recent_burn_rate_credits_per_hour(
-    accounts: list[_PaceAccount],
-    secondary_history: dict[str, list[UsageHistory]],
-    now: datetime,
-) -> float | None:
-    window_start = now - FLEET_BURN_WINDOW
-    total_burn_credits = 0.0
-    considered_recorded_at: list[datetime] = []
-
-    for account in accounts:
-        rows = sorted(
-            (row for row in secondary_history.get(account.account_id, []) if window_start <= row.recorded_at <= now),
-            key=lambda row: row.recorded_at,
-        )
-        if len(rows) < 2:
-            continue
-
-        considered_recorded_at.extend(row.recorded_at for row in rows)
-        for previous, current in zip(rows, rows[1:]):
-            delta_percent = current.used_percent - previous.used_percent
-            if delta_percent > 0:
-                total_burn_credits += account.full_credits * delta_percent / 100.0
-
-    if not considered_recorded_at:
-        return None
-
-    observed_span_hours = (max(considered_recorded_at) - min(considered_recorded_at)).total_seconds() / 3600.0
-    return total_burn_credits / max(0.5, observed_span_hours)
 
 
 def _next_relief(accounts: list[_PaceAccount], now_ms: float) -> tuple[float, float]:
@@ -396,23 +361,39 @@ def _recent_burn_rate_credits_per_hour(
     rows: list[UsageHistory],
     full_credits: float,
     now: datetime,
+    window_minutes: WeeklyPaceWindowMinutes = 180,
 ) -> float | None:
-    recent_start = now - RECENT_BURN_WINDOW
-    recent_rows = [row for row in rows if row.recorded_at >= recent_start and row.recorded_at <= now]
-    if len(recent_rows) < 2:
+    window_start = now - timedelta(minutes=window_minutes)
+    observed = [row for row in rows if row.recorded_at <= now]
+    if len(observed) < 2 or observed[-1].recorded_at <= window_start:
         return None
-
-    state: EWMAState | None = None
-    for row in recent_rows:
-        state = ewma_update(
-            state,
-            row.used_percent,
-            float(naive_utc_to_epoch(row.recorded_at)),
-            reset_at=row.reset_at,
+    # Keep one boundary observation. Interpolation avoids attributing an entire
+    # interval's delta to a one-minute selection; unchanged samples cannot decay
+    # an elapsed-time average as they did the per-sample forecast EWMA.
+    start = 0
+    for index, row in enumerate(observed):
+        if row.recorded_at <= window_start:
+            start = index
+    recent = observed[start:]
+    if len(recent) < 2:
+        return None
+    span_seconds = (recent[-1].recorded_at - max(window_start, recent[0].recorded_at)).total_seconds()
+    if span_seconds <= 0:
+        return None
+    used_percent = 0.0
+    for previous, current in zip(recent, recent[1:]):
+        seconds = (current.recorded_at - previous.recorded_at).total_seconds()
+        overlap = (current.recorded_at - max(window_start, previous.recorded_at)).total_seconds()
+        window_changed = previous.window_minutes != current.window_minutes
+        reset_changed = (
+            previous.reset_at is not None
+            and current.reset_at is not None
+            and abs(current.reset_at - previous.reset_at) > 60
         )
-    if state is None or state.rate is None:
-        return None
-    return max(0.0, state.rate * full_credits * 36.0)
+        if seconds > 0 and overlap > 0 and not window_changed and not reset_changed:
+            used_percent += max(0.0, current.used_percent - previous.used_percent) * overlap / seconds
+    denominator = max(min(window_minutes * 60.0, 1800.0), span_seconds)
+    return used_percent * full_credits * 36.0 / denominator
 
 
 def _smoothed_remaining_credits(

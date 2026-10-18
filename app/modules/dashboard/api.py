@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
@@ -15,9 +16,18 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    WeeklyPaceWindowMinutes,
 )
 from app.modules.model_sources.catalog import source_models_to_upstream_models
 from app.modules.model_sources.repository import ModelSourcesRepository
+
+def _parse_burn_window_minutes(
+    burn_window_minutes: int = Query(180, alias="burnWindowMinutes", json_schema_extra={"enum": [1, 15, 60, 180]}),
+) -> WeeklyPaceWindowMinutes:
+    if burn_window_minutes not in (1, 15, 60, 180):
+        raise HTTPException(status_code=422, detail="burnWindowMinutes must be 1, 15, 60 or 180")
+    return burn_window_minutes
+
 
 router = APIRouter(
     prefix="/api",
@@ -33,12 +43,14 @@ router = APIRouter(
 )
 async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
+    burn_window_minutes: WeeklyPaceWindowMinutes = Depends(_parse_burn_window_minutes),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardOverviewResponse:
     return await context.service.get_overview(
         timeframe,
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+        burn_window_minutes=burn_window_minutes,
     )
 
 
@@ -48,9 +60,10 @@ async def get_overview(
     dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_READ))],
 )
 async def get_projections(
+    burn_window_minutes: WeeklyPaceWindowMinutes = Depends(_parse_burn_window_minutes),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardProjectionsResponse:
-    return await context.service.get_projections()
+    return await context.service.get_projections(burn_window_minutes=burn_window_minutes)
 
 
 @router.get("/models", dependencies=[Depends(require_dashboard_permission(Permission.DASHBOARD_READ))])

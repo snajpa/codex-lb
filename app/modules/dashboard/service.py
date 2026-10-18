@@ -26,6 +26,7 @@ from app.modules.dashboard.schemas import (
     DepletionResponse,
     WeeklyCreditApiKeyAttribution,
     WeeklyCreditPaceResponse,
+    WeeklyPaceWindowMinutes,
 )
 from app.modules.dashboard.spend_projection import build_spend_projection
 from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, FLEET_BURN_WINDOW, build_weekly_credit_pace
@@ -93,6 +94,7 @@ class DashboardService:
         timeframe_key: DashboardOverviewTimeframeKey = "7d",
         *,
         redact_identity: bool = False,
+        burn_window_minutes: WeeklyPaceWindowMinutes = 180,
     ) -> DashboardOverviewResponse:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
@@ -214,6 +216,7 @@ class DashboardService:
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+            burn_window_minutes=burn_window_minutes,
         )
         await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
 
@@ -241,7 +244,9 @@ class DashboardService:
             api_spend_projection=spend_projection,
         )
 
-    async def get_projections(self) -> DashboardProjectionsResponse:
+    async def get_projections(
+        self, *, burn_window_minutes: WeeklyPaceWindowMinutes = 180
+    ) -> DashboardProjectionsResponse:
         now = utcnow()
         accounts = await self._repo.list_accounts()
         primary_usage = await self._repo.latest_usage_by_account("primary")
@@ -278,6 +283,7 @@ class DashboardService:
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+            burn_window_minutes=burn_window_minutes,
         )
         await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
         return DashboardProjectionsResponse(

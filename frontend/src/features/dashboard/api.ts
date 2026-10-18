@@ -11,6 +11,7 @@ import {
   type ConversationTimeframe,
   type OverviewTimeframe,
   type RequestLogTimeframe,
+  type WeeklyPaceWindowMinutes,
 } from "@/features/dashboard/schemas";
 
 const DASHBOARD_PATH = "/api/dashboard";
@@ -42,6 +43,7 @@ export type RequestLogFacetFilters = {
 
 export type DashboardOverviewParams = {
   timeframe?: OverviewTimeframe;
+  burnWindowMinutes?: WeeklyPaceWindowMinutes;
 };
 
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
@@ -58,11 +60,13 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
 export function getDashboardOverview(params: DashboardOverviewParams = {}) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
+  if (params.burnWindowMinutes != null) query.set("burnWindowMinutes", String(params.burnWindowMinutes));
   return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
 }
 
-export function getDashboardProjections() {
-  return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
+export function getDashboardProjections(burnWindowMinutes: WeeklyPaceWindowMinutes = 180) {
+  const query = burnWindowMinutes === 180 ? "" : `?burnWindowMinutes=${burnWindowMinutes}`;
+  return get(`${DASHBOARD_PATH}/projections${query}`, DashboardProjectionsSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

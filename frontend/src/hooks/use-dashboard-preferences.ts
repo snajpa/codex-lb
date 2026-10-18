@@ -1,11 +1,14 @@
 import { create } from "zustand";
 
+import type { WeeklyPaceWindowMinutes } from "@/features/dashboard/schemas";
+
 import type { AccountListSort, AccountListSortKey } from "@/features/dashboard/components/account-list";
 
 const ACCOUNT_BURNRATE_STORAGE_KEY = "codex-lb-account-burnrate-enabled";
 const ACCOUNT_VIEW_MODE_STORAGE_KEY = "codex-lb-dashboard-account-view-mode";
 const ACCOUNT_LIST_SORT_STORAGE_KEY = "codex-lb-dashboard-account-list-sort";
 const DASHBOARD_REFRESH_STORAGE_KEY = "codex-lb-dashboard-refresh-seconds";
+const WEEKLY_PACE_WINDOW_STORAGE_KEY = "codex-lb-weekly-pace-window-minutes";
 
 export type DashboardRefreshSeconds = 5 | 15 | 30 | 60;
 
@@ -16,6 +19,8 @@ type DashboardPreferencesState = {
   accountViewMode: DashboardAccountViewMode;
   accountListSort: AccountListSort;
   refreshSeconds: DashboardRefreshSeconds;
+  weeklyPaceWindowMinutes: WeeklyPaceWindowMinutes;
+  setWeeklyPaceWindowMinutes: (minutes: WeeklyPaceWindowMinutes) => void;
   initialized: boolean;
   initializePreferences: () => void;
   setAccountBurnrateEnabled: (enabled: boolean) => void;
@@ -132,17 +137,20 @@ export const useDashboardPreferencesStore = create<DashboardPreferencesState>((s
   accountViewMode: "cards",
   accountListSort: null,
   refreshSeconds: 15,
+  weeklyPaceWindowMinutes: 180,
   initialized: false,
   initializePreferences: () => {
     const accountBurnrateEnabled = readStoredAccountBurnrateEnabled() ?? true;
     const accountViewMode = readStoredAccountViewMode() ?? "cards";
     const accountListSort = readStoredAccountListSort();
     const refreshSeconds = readStoredRefreshSeconds() ?? 15;
+    const storedWindow = typeof window === "undefined" ? 180 : Number(window.localStorage.getItem(WEEKLY_PACE_WINDOW_STORAGE_KEY));
+    const weeklyPaceWindowMinutes = storedWindow === 1 || storedWindow === 15 || storedWindow === 60 ? storedWindow : 180;
     persistAccountBurnrateEnabled(accountBurnrateEnabled);
     persistAccountViewMode(accountViewMode);
     persistAccountListSort(accountListSort);
     persistRefreshSeconds(refreshSeconds);
-    set({ accountBurnrateEnabled, accountViewMode, accountListSort, refreshSeconds, initialized: true });
+    set({ accountBurnrateEnabled, accountViewMode, accountListSort, refreshSeconds, weeklyPaceWindowMinutes, initialized: true });
   },
   setAccountBurnrateEnabled: (enabled) => {
     persistAccountBurnrateEnabled(enabled);
@@ -155,6 +163,10 @@ export const useDashboardPreferencesStore = create<DashboardPreferencesState>((s
   setAccountListSort: (sort) => {
     persistAccountListSort(sort);
     set({ accountListSort: sort, initialized: true });
+  },
+  setWeeklyPaceWindowMinutes: (minutes) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(WEEKLY_PACE_WINDOW_STORAGE_KEY, String(minutes));
+    set({ weeklyPaceWindowMinutes: minutes });
   },
   setRefreshSeconds: (seconds) => {
     persistRefreshSeconds(seconds);

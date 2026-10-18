@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
 import { Gauge } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { WeeklyCreditPace, WeeklyCreditRunwayStatus } from "@/features/dashboard/utils";
+import type { WeeklyPaceWindowMinutes } from "@/features/dashboard/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber, formatDateTimeInline, formatModelLabel } from "@/utils/formatters";
@@ -10,6 +12,10 @@ const PRO_WEEKLY_CAPACITY_CREDITS = 50_400;
 
 export type WeeklyCreditsPaceCardProps = {
   pace: WeeklyCreditPace | null;
+  burnWindowMinutes?: WeeklyPaceWindowMinutes;
+  onBurnWindowChange?: (minutes: WeeklyPaceWindowMinutes) => void;
+  isLoading?: boolean;
+  error?: string | null;
 };
 
 function formatPercent(value: number): string {
@@ -221,11 +227,13 @@ function RunwayWeeklyCreditsPaceCard({
   runwayStatus,
   headroomPercent,
   headroomCredits,
+  controls,
 }: {
   pace: WeeklyCreditPace;
   runwayStatus: WeeklyCreditRunwayStatus;
   headroomPercent: number;
   headroomCredits: number;
+  controls?: ReactNode;
 }) {
   const { t } = useTranslation();
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
@@ -236,7 +244,8 @@ function RunwayWeeklyCreditsPaceCard({
   const reliefCredits = pace.nextReliefCredits ?? null;
   const saturated =
     pace.saturatedAccountCount != null && pace.accountCount > 0 && pace.saturatedAccountCount === pace.accountCount;
-  const runsDry = runwayStatus === "runs_dry";
+  const measured = burnRate != null && burnRate > 0;
+  const runsDry = measured && runwayStatus === "runs_dry";
 
   // The depletion/reset tooltips are read-only timestamps, so they follow the
   // dashboard's date-display and 12/24-hour preferences via the shared
@@ -268,12 +277,13 @@ function RunwayWeeklyCreditsPaceCard({
           data-testid="weekly-runway-verdict"
           className={cn(
             "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-medium",
-            VERDICT_BADGE_CLASSES[runwayStatus],
+            VERDICT_BADGE_CLASSES[measured ? runwayStatus : "safe"],
           )}
         >
-          {t(VERDICT_LABEL_KEYS[runwayStatus])}
+          {t(measured ? VERDICT_LABEL_KEYS[runwayStatus] : burnRate === 0 ? "dashboard.weeklyPace.noObservedBurn" : "dashboard.weeklyPace.burnUnknown")}
         </span>
       </div>
+      {controls}
 
       <div className="space-y-4">
         <div className="min-h-16">
@@ -298,7 +308,7 @@ function RunwayWeeklyCreditsPaceCard({
               // which must read differently from a measured zero burn.
               <span>{t("dashboard.weeklyPace.burnNotMeasured")}</span>
             ) : (
-              <span>{t("dashboard.weeklyPace.steadyState")}</span>
+              <span>{t("dashboard.weeklyPace.noObservedBurn")}</span>
             )}
             {burnRateLine ? <span className="ml-1.5">{burnRateLine}</span> : null}
           </p>
@@ -429,7 +439,7 @@ function RunwayWeeklyCreditsPaceCard({
   );
 }
 
-function LegacyWeeklyCreditsPaceCard({ pace }: { pace: WeeklyCreditPace }) {
+function LegacyWeeklyCreditsPaceCard({ pace, controls }: { pace: WeeklyCreditPace; controls?: ReactNode }) {
   const { t } = useTranslation();
   const statusClass =
     pace.status === "danger"
@@ -464,6 +474,7 @@ function LegacyWeeklyCreditsPaceCard({ pace }: { pace: WeeklyCreditPace }) {
           <Gauge className="h-4 w-4" aria-hidden="true" />
         </div>
       </div>
+      {controls}
 
       <div className="space-y-4">
         <div className="space-y-3">
@@ -534,22 +545,57 @@ function LegacyWeeklyCreditsPaceCard({ pace }: { pace: WeeklyCreditPace }) {
   );
 }
 
-export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
-  if (!pace) {
-    return null;
-  }
-  // The runway layout renders only when the backend sent the full companion
-  // set; a partial payload falls back to the legacy layout instead of
-  // masking gaps with synthesized stand-in numbers.
-  if (pace.runwayStatus != null && pace.headroomPercent != null && pace.headroomCredits != null) {
+const BURN_WINDOWS: { minutes: WeeklyPaceWindowMinutes; label: string }[] = [
+  { minutes: 1, label: "1 min" },
+  { minutes: 15, label: "15 min" },
+  { minutes: 60, label: "1 h" },
+  { minutes: 180, label: "3 h" },
+];
+
+export function WeeklyCreditsPaceCard({
+  pace,
+  burnWindowMinutes = 180,
+  onBurnWindowChange,
+  isLoading = false,
+  error = null,
+}: WeeklyCreditsPaceCardProps) {
+  const { t } = useTranslation();
+  const controls = onBurnWindowChange ? (
+    <div className="mb-4 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">{t("dashboard.weeklyPace.averagingWindow")}</span>
+        <div className="inline-flex h-8 items-center rounded-md border bg-background p-0.5" role="group" aria-label={t("dashboard.weeklyPace.averagingWindow")}>
+          {BURN_WINDOWS.map(({ minutes, label }) => (
+            <button key={minutes} type="button" aria-pressed={burnWindowMinutes === minutes}
+              onClick={() => onBurnWindowChange(minutes)}
+              className={cn("h-6 rounded-[5px] px-2 text-xs tabular-nums transition-colors", burnWindowMinutes === minutes
+                ? "bg-accent text-accent-foreground shadow-sm" : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground")}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {burnWindowMinutes <= 15 ? <p className="text-[11px] text-muted-foreground">{t("dashboard.weeklyPace.roundingNote")}</p> : null}
+      {error ? <p role="alert" className="text-xs text-destructive">{t("dashboard.weeklyPace.windowLoadFailed")}</p> : null}
+    </div>
+  ) : null;
+  // A retained response from another window must never wear the new selection.
+  const selectedPace = pace && (pace.burnWindowMinutes ?? 180) === burnWindowMinutes ? pace : null;
+  if (!selectedPace) {
+    if (!controls) return null;
     return (
-      <RunwayWeeklyCreditsPaceCard
-        pace={pace}
-        runwayStatus={pace.runwayStatus}
-        headroomPercent={pace.headroomPercent}
-        headroomCredits={pace.headroomCredits}
-      />
+      <section className="rounded-xl border bg-card p-5" aria-label={t("dashboard.weeklyPace.title")} aria-busy={isLoading}>
+        <h3 className="mb-4 text-sm font-semibold">{t("dashboard.weeklyPace.title")}</h3>
+        {controls}
+        <p role="status" className="text-xs text-muted-foreground">{t(isLoading ? "dashboard.weeklyPace.windowLoading" : "dashboard.weeklyPace.burnNotMeasured")}</p>
+      </section>
     );
   }
-  return <LegacyWeeklyCreditsPaceCard pace={pace} />;
+  if (selectedPace.runwayStatus != null && selectedPace.headroomPercent != null && selectedPace.headroomCredits != null) {
+    return (
+      <RunwayWeeklyCreditsPaceCard pace={selectedPace} runwayStatus={selectedPace.runwayStatus}
+        headroomPercent={selectedPace.headroomPercent} headroomCredits={selectedPace.headroomCredits} controls={controls} />
+    );
+  }
+  return <LegacyWeeklyCreditsPaceCard pace={selectedPace} controls={controls} />;
 }
