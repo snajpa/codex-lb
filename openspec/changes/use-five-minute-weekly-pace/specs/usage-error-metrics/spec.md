@@ -72,3 +72,8 @@ with a conservatively rounded display, not merely equal to nominal weekly supply
 #### Scenario: Expired and future quota observations
 - **WHEN** an eligible balance belongs to an already elapsed reset cycle or a future observation
 - **THEN** complete-fleet pace MUST be unavailable rather than advancing that balance into a new cycle
+
+#### Scenario: Quota ingestion overlaps a dashboard read
+- **WHEN** a valid quota observation is committed after request start but before quota reads finish
+- **THEN** the route MUST evaluate pace against the completed-read clock, not reject ordinary ingestion as future data
+- **AND** percentage-burn generatedAt MUST use that same evaluation instant

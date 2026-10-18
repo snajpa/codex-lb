@@ -48,3 +48,8 @@ old cycle; unsafe nominal throttling; earlier non-cohort relief; depletion after
 the first reset; rendered feasible load/ETA; same-time raw live history replay;
 both HTTP routes and real MariaDB; bounded actual built-browser and native
 continuation qualification before guarded immutable deployment.
+
+Take the pace evaluation clock after the asynchronous quota/history reads and
+use it for both weekly pace and percentage-burn generatedAt. A snapshot arriving
+normally after request start is not a future-clock error. Keep the original
+request clock for unrelated activity/timeframe aggregates.

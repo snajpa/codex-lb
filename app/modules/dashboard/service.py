@@ -207,11 +207,12 @@ class DashboardService:
             since=now - DEMAND_WINDOW,
             until=now,
         )
+        pace_now = utcnow()
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
             secondary_history=secondary_history,
-            now=now,
+            now=pace_now,
             usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
@@ -228,7 +229,7 @@ class DashboardService:
             accounts,
             {},
             secondary_history,
-            now=now,
+            now=pace_now,
             usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
         )
         additional_ts = await self._repo.latest_additional_recorded_at()
@@ -274,11 +275,12 @@ class DashboardService:
             since=now - DEMAND_WINDOW,
             until=now,
         )
+        pace_now = utcnow()
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
             secondary_history=secondary_history,
-            now=now,
+            now=pace_now,
             usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
@@ -294,7 +296,7 @@ class DashboardService:
                 accounts,
                 primary_history,
                 secondary_history,
-                now=now,
+                now=pace_now,
                 usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             ),
         )
