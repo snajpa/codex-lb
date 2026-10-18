@@ -368,7 +368,7 @@ def _recent_burn_rate_credits_per_hour(
     if len(observed) < 2 or observed[-1].recorded_at <= window_start:
         return None
     # Keep one boundary observation. Interpolation avoids attributing an entire
-    # interval's delta to a one-minute selection; unchanged samples cannot decay
+    # interval's delta to a five-minute selection; unchanged samples cannot decay
     # an elapsed-time average as they did the per-sample forecast EWMA.
     start = 0
     for index, row in enumerate(observed):

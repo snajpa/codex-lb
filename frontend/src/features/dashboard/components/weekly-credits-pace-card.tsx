@@ -546,7 +546,7 @@ function LegacyWeeklyCreditsPaceCard({ pace, controls }: { pace: WeeklyCreditPac
 }
 
 const BURN_WINDOWS: { minutes: WeeklyPaceWindowMinutes; label: string }[] = [
-  { minutes: 1, label: "1 min" },
+  { minutes: 5, label: "5 min" },
   { minutes: 15, label: "15 min" },
   { minutes: 60, label: "1 h" },
   { minutes: 180, label: "3 h" },

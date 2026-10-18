@@ -145,7 +145,8 @@ export const useDashboardPreferencesStore = create<DashboardPreferencesState>((s
     const accountListSort = readStoredAccountListSort();
     const refreshSeconds = readStoredRefreshSeconds() ?? 15;
     const storedWindow = typeof window === "undefined" ? 180 : Number(window.localStorage.getItem(WEEKLY_PACE_WINDOW_STORAGE_KEY));
-    const weeklyPaceWindowMinutes = storedWindow === 1 || storedWindow === 15 || storedWindow === 60 ? storedWindow : 180;
+    const weeklyPaceWindowMinutes = storedWindow === 1 ? 5 : storedWindow === 5 || storedWindow === 15 || storedWindow === 60 ? storedWindow : 180;
+    if (typeof window !== "undefined") window.localStorage.setItem(WEEKLY_PACE_WINDOW_STORAGE_KEY, String(weeklyPaceWindowMinutes));
     persistAccountBurnrateEnabled(accountBurnrateEnabled);
     persistAccountViewMode(accountViewMode);
     persistAccountListSort(accountListSort);

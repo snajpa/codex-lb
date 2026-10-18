@@ -22,10 +22,10 @@ from app.modules.model_sources.repository import ModelSourcesRepository
 
 
 def _parse_burn_window_minutes(
-    burn_window_minutes: int = Query(180, alias="burnWindowMinutes", json_schema_extra={"enum": [1, 15, 60, 180]}),
+    burn_window_minutes: int = Query(180, alias="burnWindowMinutes", json_schema_extra={"enum": [5, 15, 60, 180]}),
 ) -> WeeklyPaceWindowMinutes:
-    if burn_window_minutes not in (1, 15, 60, 180):
-        raise HTTPException(status_code=422, detail="burnWindowMinutes must be 1, 15, 60 or 180")
+    if burn_window_minutes not in (5, 15, 60, 180):
+        raise HTTPException(status_code=422, detail="burnWindowMinutes must be 5, 15, 60 or 180")
     return burn_window_minutes
 
 

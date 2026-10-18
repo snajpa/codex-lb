@@ -123,7 +123,7 @@ const WeeklyCreditApiKeyAttributionSchema = z.object({
 const WeeklyCreditPaceStatusSchema = z.enum(["behind", "on_track", "ahead", "danger"]);
 const WeeklyCreditRunwayStatusSchema = z.enum(["safe", "tight", "runs_dry"]);
 
-export type WeeklyPaceWindowMinutes = 1 | 15 | 60 | 180;
+export type WeeklyPaceWindowMinutes = 5 | 15 | 60 | 180;
 
 const WeeklyCreditPaceSchema = z.object({
   burnWindowMinutes: z.union([z.literal(1), z.literal(15), z.literal(60), z.literal(180)]).optional(),

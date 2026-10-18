@@ -72,7 +72,7 @@ class DepletionResponse(DashboardModel):
 WeeklyCreditPaceStatus = Literal["behind", "on_track", "ahead", "danger"]
 WeeklyCreditPaceConfidence = Literal["high", "medium", "low"]
 WeeklyCreditRunwayStatus = Literal["safe", "tight", "runs_dry"]
-WeeklyPaceWindowMinutes = Literal[1, 15, 60, 180]
+WeeklyPaceWindowMinutes = Literal[5, 15, 60, 180]
 
 
 class WeeklyCreditResetEvent(DashboardModel):
