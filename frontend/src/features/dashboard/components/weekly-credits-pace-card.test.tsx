@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import type { WeeklyCreditPace } from "@/features/dashboard/utils";
@@ -401,7 +401,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
       />,
     );
 
-    expect(screen.getByText("no recent burn — holding steady")).toBeInTheDocument();
+    expect(screen.getAllByText("No quota change observed").length).toBeGreaterThan(0);
     expect(screen.queryByText("not enough recent samples to measure burn")).not.toBeInTheDocument();
     expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
     expect(screen.queryByTestId("runway-eta-marker")).not.toBeInTheDocument();
@@ -462,5 +462,42 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
       screen.queryByText("All accounts saturated — demand figures are at-least floors"),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/at ~6K\/h/)).toBeInTheDocument();
+  });
+});
+
+describe("weekly pace averaging controls", () => {
+  it("offers all four windows and passes the selected minutes", () => {
+    const onChange = vi.fn();
+    render(<WeeklyCreditsPaceCard pace={BASE_PACE} onBurnWindowChange={onChange} />);
+    for (const [label, minutes] of [["1 min", 1], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
+      const button = screen.getByRole("button", { name: label });
+      expect(button).toHaveAttribute("aria-pressed", String(minutes === 180));
+      fireEvent.click(button);
+      expect(onChange).toHaveBeenLastCalledWith(minutes);
+    }
+  });
+
+  it("keeps controls during loading and never relabels old-window values", () => {
+    render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={1} onBurnWindowChange={vi.fn()} isLoading />);
+    expect(screen.getByRole("button", { name: "1 min" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText("50%")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading the selected averaging window");
+    expect(screen.getByText(/Quota percentages are rounded/)).toBeInTheDocument();
+  });
+
+  it("keeps controls and reports failure without old-window values", () => {
+    render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={15} onBurnWindowChange={vi.fn()} error="failed" />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh this averaging window");
+    expect(screen.getByRole("button", { name: "3 h" })).toBeEnabled();
+    expect(screen.queryByText("50%")).not.toBeInTheDocument();
+  });
+
+  it("does not call a rounded zero a measured safe runway", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...BASE_PACE, burnWindowMinutes: 1,
+      runwayStatus: "safe", headroomPercent: 50, headroomCredits: 500000,
+      burnRateRecentCreditsPerHour: 0, depletionEtaHours: null }}
+      burnWindowMinutes={1} onBurnWindowChange={vi.fn()} />);
+    expect(screen.getByTestId("weekly-runway-verdict")).toHaveTextContent("No quota change observed");
+    expect(screen.queryByText("Safe until reset")).not.toBeInTheDocument();
   });
 });

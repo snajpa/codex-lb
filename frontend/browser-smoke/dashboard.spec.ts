@@ -606,3 +606,77 @@ test("accounting dashboard retains upstream credit runway and every account row"
   }
   expect(failures).toEqual([]);
 });
+
+
+test("weekly pace switches all averaging windows against the real backend", async ({ page }) => {
+  execFileSync("python3", [path.resolve("browser-smoke/seed_accounting.py")], { cwd: path.resolve(".."), env: process.env });
+  const initialProjection = page.waitForResponse(response => new URL(response.url()).pathname === "/api/dashboard/projections");
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  const initialResponse = await initialProjection;
+  const controls = page.getByRole("group", { name: "Average over" });
+  await expect(controls.getByRole("button", { name: "3 h", exact: true })).toHaveAttribute("aria-pressed", "true");
+  for (const [label, minutes] of [["1 min", 1], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
+    const received = minutes === 180 ? Promise.resolve(initialResponse) : page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/dashboard/projections" && Number(url.searchParams.get("burnWindowMinutes") ?? 180) === minutes;
+    });
+    await controls.getByRole("button", { name: label, exact: true }).click();
+    const response = await received;
+    expect(response.ok()).toBe(true);
+    const pace = (await response.json()).weeklyCreditPace;
+    expect(pace.burnWindowMinutes).toBe(minutes);
+    expect(pace.forecastBurnRateCreditsPerHour).toBe(pace.burnRateRecentCreditsPerHour);
+    await expect(controls.getByRole("button", { name: label, exact: true })).toHaveAttribute("aria-pressed", "true");
+  }
+  await controls.getByRole("button", { name: "15 min", exact: true }).click();
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(controls.getByRole("button", { name: "15 min", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await controls.scrollIntoViewIfNeeded();
+  for (const label of ["1 min", "15 min", "1 h", "3 h"]) {
+    await expect(controls.getByRole("button", { name: label, exact: true })).toBeInViewport();
+  }
+  const directory = process.env.DASHBOARD_SCREENSHOT_OUTPUT_DIR;
+  if (directory) await page.screenshot({ path: path.join(directory, "weekly-pace-mobile.png"), fullPage: true });
+});
+
+test("weekly pace ignores late windows and keeps controls usable after an error", async ({ page }) => {
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  const controls = page.getByRole("group", { name: "Average over" });
+  let release!: () => void;
+  let started!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const requested = new Promise<void>(resolve => { started = resolve; });
+  await page.route("**/api/dashboard/projections?burnWindowMinutes=1", async route => {
+    const response = await route.fetch();
+    started();
+    await held;
+    await route.fulfill({ response });
+  });
+  await controls.getByRole("button", { name: "1 min", exact: true }).click();
+  await requested;
+  const oneHour = page.waitForResponse(response => response.url().endsWith("/api/dashboard/projections?burnWindowMinutes=60"));
+  await controls.getByRole("button", { name: "1 h", exact: true }).click();
+  expect((await oneHour).ok()).toBe(true);
+  release();
+  await expect(controls.getByRole("button", { name: "1 h", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.route("**/api/dashboard/projections?burnWindowMinutes=15", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "unavailable" } }) }));
+  await controls.getByRole("button", { name: "15 min", exact: true }).click();
+  await expect(page.getByText("Could not refresh this averaging window. Select another window or retry.")).toBeVisible({ timeout: 15_000 });
+  await controls.getByRole("button", { name: "3 h", exact: true }).click();
+  await expect(controls.getByRole("button", { name: "3 h", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("Could not refresh this averaging window. Select another window or retry.")).toHaveCount(0);
+});
+
+test("the built selectable card does not label a cumulative fallback as three hours", async ({ page }) => {
+  for (const endpoint of ["overview", "projections"]) {
+    await page.route(`**/api/dashboard/${endpoint}**`, async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), weeklyCreditPace: null } });
+    });
+  }
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  await expect(page.getByRole("group", { name: "Average over" })).toBeVisible();
+  await expect(page.getByTestId("weekly-runway-verdict")).toHaveCount(0);
+  await expect(page.getByText("not enough recent samples to measure burn")).toBeVisible();
+});

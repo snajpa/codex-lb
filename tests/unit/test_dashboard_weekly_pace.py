@@ -11,6 +11,7 @@ from app.db.models import Account, AccountStatus, ApiKey, RequestLog, UsageHisto
 from app.db.session import SessionLocal
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.repository import DashboardRepository
+from app.modules.dashboard.schemas import WeeklyPaceWindowMinutes
 from app.modules.dashboard.weekly_pace import PRO_WEEKLY_CAPACITY_CREDITS, build_weekly_credit_pace
 
 NOW = datetime(2026, 8, 17, 12, 0, 0)
@@ -69,7 +70,9 @@ def _build(
     histories: dict[str, list[UsageHistory]],
     *,
     trailing_demand_used_percent_by_account: dict[str, float] | None = None,
+    burn_window_minutes: WeeklyPaceWindowMinutes | None = None,
 ):
+    window_argument = {} if burn_window_minutes is None else {"burn_window_minutes": burn_window_minutes}
     pace = build_weekly_credit_pace(
         accounts=[_account(summary.account_id) for summary in summaries],
         account_summaries=summaries,
@@ -77,6 +80,7 @@ def _build(
         now=NOW,
         usage_refresh_interval_seconds=60,
         trailing_demand_used_percent_by_account=trailing_demand_used_percent_by_account,
+        **window_argument,
     )
     assert pace is not None
     return pace
@@ -227,7 +231,7 @@ def test_weekly_pace_recent_burn_skips_reset_delta() -> None:
         },
     )
 
-    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(0.0)
+    assert pace.burn_rate_recent_credits_per_hour is None
 
 
 def test_weekly_pace_recent_burn_ignores_single_sample_accounts() -> None:
@@ -520,3 +524,134 @@ def test_weekly_pace_is_unchanged_by_ewma_tail_cap_under_fleet_burn_floor() -> N
     assert full_pace.burn_rate_recent_credits_per_hour is not None
     assert full_pace.burn_rate_recent_credits_per_hour > 0
     _assert_close(tail_pace.model_dump(), full_pace.model_dump())
+
+
+@pytest.mark.parametrize(("minutes", "expected_rate"), [(1, 30240), (15, 4032), (60, 1512), (180, 672)])
+def test_selected_window_drives_displayed_burn_and_forecast(
+    minutes: WeeklyPaceWindowMinutes, expected_rate: float
+) -> None:
+    account_id = "selected-window"
+    rows = [
+        _row(account_id, used, NOW - timedelta(minutes=offset))
+        for offset, used in [(180, 10), (60, 11), (15, 12), (1, 13), (0, 14)]
+    ]
+    pace = _build(
+        [_summary(account_id, used_percent=14, reset_in_hours=145)], {account_id: rows}, burn_window_minutes=minutes
+    )
+    assert pace.burn_window_minutes == minutes
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(expected_rate)
+    assert pace.forecast_burn_rate_credits_per_hour == pytest.approx(expected_rate)
+    assert pace.depletion_eta_hours == pytest.approx(pace.headroom_credits / expected_rate)
+    assert pace.pace_multiplier == pytest.approx(expected_rate / pace.scheduled_burn_rate_credits_per_hour)
+
+
+def test_repeated_unchanged_snapshots_do_not_decay_forecast() -> None:
+    account_id = "sample-cadence"
+    summary = _summary(account_id, used_percent=14, reset_in_hours=145)
+    baseline = [
+        _row(account_id, 10, NOW - timedelta(hours=3)),
+        _row(account_id, 14, NOW - timedelta(minutes=10)),
+        _row(account_id, 14, NOW),
+    ]
+    dense = baseline[:2] + [_row(account_id, 14, NOW - timedelta(seconds=seconds)) for seconds in range(599, -1, -1)]
+    sparse_pace = _build([summary], {account_id: baseline})
+    dense_pace = _build([summary], {account_id: dense})
+    assert dense_pace.forecast_burn_rate_credits_per_hour == pytest.approx(672)
+    assert dense_pace.forecast_burn_rate_credits_per_hour == pytest.approx(
+        sparse_pace.forecast_burn_rate_credits_per_hour
+    )
+    assert dense_pace.forecast_burn_rate_credits_per_hour == dense_pace.burn_rate_recent_credits_per_hour
+
+
+def test_one_minute_clips_boundary_interval_without_thirty_minute_dilution() -> None:
+    account_id = "boundary-window"
+    rows = [_row(account_id, 10, NOW - timedelta(minutes=2)), _row(account_id, 12, NOW)]
+    pace = _build(
+        [_summary(account_id, used_percent=12, reset_in_hours=145)], {account_id: rows}, burn_window_minutes=1
+    )
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(30240)
+
+
+def test_incomplete_pool_observations_do_not_report_partial_fleet_burn() -> None:
+    summaries = [_summary(name, used_percent=14, reset_in_hours=145) for name in ("covered", "missing")]
+    histories = {
+        "covered": [_row("covered", 10, NOW - timedelta(minutes=1)), _row("covered", 14, NOW)],
+        "missing": [_row("missing", 14, NOW)],
+    }
+    pace = _build(summaries, histories, burn_window_minutes=1)
+    assert pace.burn_rate_recent_credits_per_hour is None
+    assert pace.forecast_burn_rate_credits_per_hour is None
+    assert pace.depletion_eta_hours is None
+    assert pace.throttle_to_percent is None
+
+
+@pytest.mark.parametrize("change", ["decrease", "reset", "duration"])
+def test_quota_discontinuities_do_not_create_burn(change: str) -> None:
+    account_id = "discontinuity"
+    previous = _row(account_id, 10, NOW - timedelta(minutes=1))
+    current = _row(account_id, 12, NOW)
+    if change == "decrease":
+        current.used_percent = 1
+    elif change == "reset":
+        current.reset_at = cast(int, previous.reset_at) + 604800
+    else:
+        current.window_minutes = 300
+    pace = _build(
+        [_summary(account_id, used_percent=current.used_percent, reset_in_hours=145)],
+        {account_id: [previous, current]},
+        burn_window_minutes=1,
+    )
+    assert pace.burn_rate_recent_credits_per_hour is None
+    assert pace.forecast_burn_rate_credits_per_hour is None
+
+
+def test_reset_countdown_jitter_does_not_hide_real_burn() -> None:
+    account_id = "countdown-jitter"
+    previous = _row(account_id, 10, NOW - timedelta(minutes=1))
+    current = _row(account_id, 11, NOW)
+    current.reset_at = cast(int, previous.reset_at) + 1
+    pace = _build(
+        [_summary(account_id, used_percent=11, reset_in_hours=145)],
+        {account_id: [previous, current]},
+        burn_window_minutes=1,
+    )
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(30240)
+
+
+@pytest.mark.parametrize("change", ["decrease", "reset", "duration"])
+def test_discontinuous_account_prevents_partial_fleet_forecast(change: str) -> None:
+    summaries = [_summary(name, used_percent=14, reset_in_hours=145) for name in ("covered", "discontinuous")]
+    previous = _row("discontinuous", 12, NOW - timedelta(minutes=1))
+    current = _row("discontinuous", 14, NOW)
+    if change == "decrease":
+        previous.used_percent = 90
+    elif change == "reset":
+        current.reset_at = cast(int, previous.reset_at) + 604800
+    else:
+        current.window_minutes = 300
+    pace = _build(
+        summaries,
+        {
+            "covered": [_row("covered", 10, NOW - timedelta(minutes=1)), _row("covered", 14, NOW)],
+            "discontinuous": [previous, current],
+        },
+        burn_window_minutes=1,
+    )
+    assert pace.burn_rate_recent_credits_per_hour is None
+    assert pace.forecast_burn_rate_credits_per_hour is None
+    assert pace.depletion_eta_hours is None
+    assert pace.throttle_to_percent is None
+
+
+def test_stable_unchanged_interval_remains_measured_zero() -> None:
+    account_id = "stable-no-change"
+    pace = _build(
+        [_summary(account_id, used_percent=14, reset_in_hours=145)],
+        {
+            account_id: [_row(account_id, 14, NOW - timedelta(minutes=1)), _row(account_id, 14, NOW)],
+        },
+        burn_window_minutes=1,
+    )
+    assert pace.burn_rate_recent_credits_per_hour == 0
+    assert pace.forecast_burn_rate_credits_per_hour == 0
+    assert pace.depletion_eta_hours is None

@@ -270,36 +270,36 @@
     "block": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
     "python_normalization": false,
     "native_text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
-    "native_type": "response.completed",
+    "native_type": "response.output_text.delta",
     "expected": [
       {
         "sdk": false,
-        "text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
-        "event_type": "response.completed"
+        "text": "data: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
       },
       {
         "sdk": true,
-        "text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
-        "event_type": "response.completed"
+        "text": "data: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
       }
     ]
   },
   {
     "name": "malformed_canonical",
     "block": "event: response.completed\ndata: {broken\n\n",
-    "python_normalization": false,
+    "python_normalization": true,
     "native_text": "event: response.completed\ndata: {broken\n\n",
-    "native_type": "response.completed",
+    "native_type": null,
     "expected": [
       {
         "sdk": false,
         "text": "event: response.completed\ndata: {broken\n\n",
-        "event_type": "response.completed"
+        "event_type": null
       },
       {
         "sdk": true,
         "text": "event: response.completed\ndata: {broken\n\n",
-        "event_type": "response.completed"
+        "event_type": null
       }
     ]
   },
@@ -876,9 +876,9 @@
   {
     "name": "canonical_escaped_error_key",
     "block": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
-    "python_normalization": false,
+    "python_normalization": true,
     "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
-    "native_type": "response.output_text.delta",
+    "native_type": null,
     "expected": [
       {
         "sdk": false,
@@ -887,8 +887,8 @@
       },
       {
         "sdk": true,
-        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
-        "event_type": "response.output_text.delta"
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
       }
     ]
   },
@@ -908,6 +908,44 @@
         "sdk": true,
         "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
         "event_type": "response.failed"
+      }
+    ]
+  },
+  {
+    "name": "mislabeled_valid_terminal",
+    "block": "event: response.created\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.created\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+    "native_type": "response.completed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+        "event_type": "response.completed"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+        "event_type": "response.completed"
+      }
+    ]
+  },
+  {
+    "name": "escaped_payload_terminal",
+    "block": "event: response.created\ndata: {\"\\u0074ype\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.created\ndata: {\"\\u0074ype\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+    "native_type": "response.completed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"\\u0074ype\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+        "event_type": "response.completed"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"\\u0074ype\":\"response.completed\",\"response\":{\"id\":\"resp_mislabeled\"}}\n\n",
+        "event_type": "response.completed"
       }
     ]
   }

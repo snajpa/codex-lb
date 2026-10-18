@@ -284,10 +284,15 @@ async def test_rate_limit_payload_detaches_pre_refresh_rows() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("used_percent", [20.0, 100.0])
 @pytest.mark.parametrize("include_pro,pro_has_usage", [(False, False), (True, True), (True, False)])
-async def test_rate_limit_payload_handles_promax_percentage_only_windows(
+async def test_rate_limit_payload_handles_uncalibrated_promax_percentage_only_windows(
     monkeypatch, used_percent, include_pro, pro_has_usage
 ):
     monkeypatch.setattr("time.time", lambda: _NOW_EPOCH)
+    # Exercise percentage-only coverage independently of the configured calibration.
+    from app.core.usage import PLAN_CAPACITY_CREDITS_PRIMARY, PLAN_CAPACITY_CREDITS_SECONDARY
+
+    monkeypatch.delitem(PLAN_CAPACITY_CREDITS_PRIMARY, "promax", raising=False)
+    monkeypatch.delitem(PLAN_CAPACITY_CREDITS_SECONDARY, "promax", raising=False)
     guard = _SharedSessionGuard()
     account = _account("max", plan_type="promax")
     accounts = [account]

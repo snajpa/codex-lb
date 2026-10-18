@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import i18n from "@/i18n";
 import { buildWeeklyCreditPace } from "@/features/dashboard/utils";
 import { formatSlug } from "@/utils/formatters";
@@ -71,7 +72,7 @@ describe("dashboard flow integration", () => {
     );
     const retainedPace = buildWeeklyCreditPace([known], new Date("2026-09-30T00:00:00Z"));
     if (!retainedPace) throw new Error("Missing retained forecast fixture");
-    queryClient.setQueryData(["dashboard", "projections"], createDashboardProjections({
+    queryClient.setQueryData(["dashboard", "projections", 180], createDashboardProjections({
       weeklyCreditPace: { ...retainedPace, paceGapSmoothingMinutes: 30 },
     }));
     server.use(
@@ -93,6 +94,27 @@ describe("dashboard flow integration", () => {
     expect(screen.queryByText(i18n.t("dashboard.weeklyPace.title"))).not.toBeInTheDocument();
     expect(await screen.findByText(i18n.t("dashboard.usage.excludedAccounts", { count: 1 }))).toBeInTheDocument();
     expect(screen.queryByTestId("usage-allowance-unknown") !== null).toBe(!mixed);
+  });
+
+  it.each([1, 15, 60, 180] as const)("keeps an unavailable overview unknown with retained %s-minute projections", async (minutes) => {
+    useDashboardPreferencesStore.setState({ weeklyPaceWindowMinutes: minutes });
+    const account = createAccountSummary({
+      resetAtSecondary: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+    });
+    const cumulativeEstimate = buildWeeklyCreditPace([account]);
+    if (!cumulativeEstimate) throw new Error("Missing cumulative estimate fixture");
+    const overview = createDashboardOverview({ accounts: [account], weeklyCreditPace: null });
+    const projections = createDashboardProjections({ weeklyCreditPace: { ...cumulativeEstimate, burnWindowMinutes: minutes, paceGapSmoothingMinutes: 30 } });
+    queryClient.setQueryData(["dashboard", "projections", minutes], projections);
+    server.use(
+      http.get("/api/dashboard/overview", () => HttpResponse.json(overview)),
+      http.get("/api/dashboard/projections", () => HttpResponse.json(projections)),
+    );
+    window.history.pushState({}, "", "/dashboard");
+    render(<QueryClientProvider client={queryClient}><BrowserRouter><App /></BrowserRouter></QueryClientProvider>);
+    expect(await screen.findByRole("group", { name: "Average over" })).toBeInTheDocument();
+    expect(await screen.findByText(i18n.t("dashboard.weeklyPace.burnNotMeasured"))).toBeInTheDocument();
+    expect(screen.queryByTestId("weekly-runway-verdict")).not.toBeInTheDocument();
   });
 
   it("loads dashboard, refetches overview on overview-timeframe changes, and keeps request-log refetches isolated", async () => {

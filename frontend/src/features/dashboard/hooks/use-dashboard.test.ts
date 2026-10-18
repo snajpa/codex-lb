@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
+import { createDashboardProjections } from "@/test/mocks/factories";
+import type { WeeklyPaceWindowMinutes } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 function createTestQueryClient(): QueryClient {
@@ -91,10 +93,54 @@ describe("useDashboard", () => {
       wrapper: createWrapper(queryClient),
     });
 
-    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections"] });
+    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections", 180] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
     expect(refetchInterval).toBe(5_000);
+  });
+
+  it("keeps a late response in its own averaging-window cache", async () => {
+    let releaseShort!: () => void;
+    const shortResponse = new Promise<void>((resolve) => { releaseShort = resolve; });
+    const requested: number[] = [];
+    server.use(http.get("/api/dashboard/projections", async ({ request }) => {
+      const minutes = Number(new URL(request.url).searchParams.get("burnWindowMinutes") ?? 180);
+      requested.push(minutes);
+      if (minutes === 1) await shortResponse;
+      return HttpResponse.json({ ...createDashboardProjections(), quotaBurn: [],
+        depletionPrimary: { risk: minutes, riskLevel: "safe", burnRate: minutes,
+          safeUsagePercent: 50, projectedExhaustionAt: null, secondsUntilExhaustion: null } });
+    }));
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryDefaults(["dashboard", "projections"], { gcTime: Infinity });
+    const { result, rerender } = renderHook(
+      ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
+      { wrapper: createWrapper(queryClient), initialProps: { minutes: 1 as WeeklyPaceWindowMinutes } },
+    );
+    await waitFor(() => expect(requested).toContain(1));
+    rerender({ minutes: 15 });
+    await waitFor(() => expect(result.current.data?.depletionPrimary?.burnRate).toBe(15));
+    releaseShort();
+    await waitFor(() => expect(queryClient.getQueryData(["dashboard", "projections", 1])).toBeDefined());
+    expect(result.current.data?.depletionPrimary?.burnRate).toBe(15);
+    expect(requested).toEqual([1, 15]);
+  });
+
+  it("does not retain another window's result when the selected request fails", async () => {
+    server.use(http.get("/api/dashboard/projections", ({ request }) => {
+      return new URL(request.url).searchParams.get("burnWindowMinutes") === "1"
+        ? HttpResponse.json({ error: { code: "failed", message: "unavailable" } }, { status: 503 })
+        : HttpResponse.json(createDashboardProjections());
+    }));
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
+      { wrapper: createWrapper(queryClient), initialProps: { minutes: 180 as WeeklyPaceWindowMinutes } },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    rerender({ minutes: 1 });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
   });
 
   it("exposes error state on request failure", async () => {
