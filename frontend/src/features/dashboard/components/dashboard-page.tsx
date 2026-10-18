@@ -121,7 +121,7 @@ export function DashboardPage() {
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
     useState<OverviewTimeframe | null>(null);
-  const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data), burnWindowMinutes);
+  const projectionsQuery = useDashboardProjections(initialized, burnWindowMinutes);
   const conversationsState = useConversations({
     enabled: canReadConversations && dashboardView === "conversations",
   });

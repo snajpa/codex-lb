@@ -78,3 +78,7 @@ window values at both default and explicit-window projections queries, identical
 read counts and evaluation timestamps, immediate cached switching, selection
 while loading, explicit null/unknown windows, shared refresh/error recovery and
 actual built-browser behavior. Measure real endpoint cost before deployment.
+
+Start the eager projections read when dashboard authentication is initialized,
+in parallel with overview rather than waiting for the overview response. The
+overview still controls whether weekly quota coverage is available for display.
