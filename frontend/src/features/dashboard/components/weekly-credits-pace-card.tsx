@@ -241,7 +241,7 @@ function RunwayWeeklyCreditsPaceCard({
   const burnRate = pace.burnRateRecentCreditsPerHour ?? null;
   const resetAware = pace.projectedDepletionHours !== undefined;
   const projectedEta = resetAware ? pace.projectedDepletionHours : pace.depletionEtaHours;
-  const etaHours = projectedEta != null && Number.isFinite(projectedEta) ? projectedEta : null;
+  const etaHours = burnRate != null && burnRate > 0 && projectedEta != null && Number.isFinite(projectedEta) ? projectedEta : null;
   const reliefHours = pace.nextReliefInHours != null && Number.isFinite(pace.nextReliefInHours) ? pace.nextReliefInHours : null;
   const reliefCredits = pace.nextReliefCredits ?? null;
   const saturated =

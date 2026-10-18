@@ -145,7 +145,7 @@ const WeeklyCreditPaceSchema = z.object({
   reduceByPercent: z.number().nullable(),
   proAccountEquivalentToCoverOverPlan: z.number().nullable(),
   proAccountsToCoverOverPlan: z.number().int().nullable(),
-  projectedDepletionHours: z.number().nullable(),
+  projectedDepletionHours: z.number().nullable().optional(),
   projectedMinimumRemainingCredits: z.number().nullable(),
   forecastBurnRateCreditsPerHour: z.number().nullable(),
   scheduledBurnRateCreditsPerHour: z.number(),
