@@ -680,3 +680,41 @@ test("the built selectable card does not label a cumulative fallback as three ho
   await expect(page.getByTestId("weekly-runway-verdict")).toHaveCount(0);
   await expect(page.getByText("not enough recent samples to measure burn")).toBeVisible();
 });
+
+
+test("reset-aware runway renders later depletion and a conservative feasible load", async ({ page }) => {
+  for (const endpoint of ["overview", "projections"]) {
+    await page.route(`**/api/dashboard/${endpoint}**`, async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      await route.fulfill({ response, json: { ...payload, weeklyCreditPace: { ...payload.weeklyCreditPace,
+        burnWindowMinutes: 180, burnRateRecentCreditsPerHour: 500, forecastBurnRateCreditsPerHour: 500,
+        headroomCredits: 25200, headroomPercent: 50, depletionEtaHours: 50.4, projectedDepletionHours: 101.8,
+        nextReliefInHours: 1, nextReliefCredits: 25700, runwayStatus: "runs_dry", throttleToPercent: 59.9999999,
+      } } });
+    });
+  }
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  await expect(page.getByText("runs out in ~4d 5h", { exact: true })).toBeVisible();
+  await expect(page.getByText("~59.99% of current load", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("weekly-runway-verdict")).toHaveText("Runs dry");
+  await expect(page.getByText(/arrives after depletion/)).toHaveCount(0);
+});
+
+test("reset-aware runway does not turn a no-reset ratio into actual exhaustion", async ({ page }) => {
+  for (const endpoint of ["overview", "projections"]) {
+    await page.route(`**/api/dashboard/${endpoint}**`, async route => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      await route.fulfill({ response, json: { ...payload, weeklyCreditPace: { ...payload.weeklyCreditPace,
+        burnWindowMinutes: 180, burnRateRecentCreditsPerHour: 200, forecastBurnRateCreditsPerHour: 200,
+        headroomCredits: 25200, headroomPercent: 50, depletionEtaHours: 126, projectedDepletionHours: null,
+        runwayStatus: "safe", throttleToPercent: null,
+      } } });
+    });
+  }
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  await expect(page.getByText("No depletion projected over two quota windows", { exact: true })).toBeVisible();
+  await expect(page.getByText(/runs out in/)).toHaveCount(0);
+  await expect(page.getByTestId("runway-eta-marker")).toHaveCount(0);
+});

@@ -1744,3 +1744,85 @@ async def test_calibrated_promax_restores_upstream_credit_runway(async_client, d
     assert pace["totalActualRemainingCredits"] == pytest.approx(151200.0)
     assert pace["burnRateRecentCreditsPerHour"] > 0
     assert pace["depletionEtaHours"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["overview", "projections"])
+async def test_dashboard_throttle_is_feasible_before_next_reset(async_client, db_setup, monkeypatch, route):
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    reset = int(naive_utc_to_epoch(now + timedelta(hours=100)))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("remaining-budget", "budget@example.test", "pro"))
+        usage = UsageRepository(session)
+        for offset, percent in [(180, 84), (0, 90)]:
+            await usage.add_entry(
+                "remaining-budget",
+                percent,
+                window="secondary",
+                window_minutes=10080,
+                reset_at=reset,
+                recorded_at=now - timedelta(minutes=offset),
+            )
+    response = await async_client.get(f"/api/dashboard/{route}")
+    assert response.status_code == 200
+    pace = response.json()["weeklyCreditPace"]
+    assert pace["runwayStatus"] == "runs_dry"
+    assert pace["headroomCredits"] == pytest.approx(5040)
+    assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(1008)
+    assert pace["projectedDepletionHours"] == pytest.approx(5)
+    assert pace["throttleToPercent"] == pytest.approx(5, abs=1e-7)
+    recommended = pace["burnRateRecentCreditsPerHour"] * pace["throttleToPercent"] / 100
+    assert recommended * 100 <= pace["headroomCredits"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["overview", "projections"])
+async def test_dashboard_expired_weekly_balance_is_unavailable(async_client, db_setup, monkeypatch, route):
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("expired-week", "expired@example.test", "pro"))
+        usage = UsageRepository(session)
+        for offset, percent in [(180, 94), (1, 100)]:
+            await usage.add_entry(
+                "expired-week",
+                percent,
+                window="secondary",
+                window_minutes=10080,
+                reset_at=int(naive_utc_to_epoch(now - timedelta(seconds=30))),
+                recorded_at=now - timedelta(minutes=offset),
+            )
+    response = await async_client.get(f"/api/dashboard/{route}")
+    assert response.status_code == 200
+    assert response.json()["weeklyCreditPace"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["overview", "projections"])
+async def test_dashboard_accepts_quota_ingested_during_read(async_client, db_setup, monkeypatch, route):
+    started = utcnow().replace(microsecond=0)
+    arrival = started + timedelta(milliseconds=1)
+    evaluated = started + timedelta(milliseconds=2)
+    clocks = iter([started, evaluated])
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: next(clocks))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("overlap-ingest", "overlap@example.test", "pro"))
+        usage = UsageRepository(session)
+        for recorded, percent in [(started - timedelta(hours=3), 84), (arrival, 90)]:
+            await usage.add_entry(
+                "overlap-ingest",
+                percent,
+                window="secondary",
+                window_minutes=10080,
+                reset_at=int(naive_utc_to_epoch(started + timedelta(hours=100))),
+                recorded_at=recorded,
+            )
+    response = await async_client.get(f"/api/dashboard/{route}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["weeklyCreditPace"] is not None
+    assert payload["weeklyCreditPace"]["burnRateRecentCreditsPerHour"] == pytest.approx(1008, abs=0.001)
+    assert payload["quotaBurn"]
+    for burn in payload["quotaBurn"]:
+        assert datetime.fromisoformat(burn["generatedAt"].replace("Z", "+00:00")).replace(tzinfo=None) == evaluated

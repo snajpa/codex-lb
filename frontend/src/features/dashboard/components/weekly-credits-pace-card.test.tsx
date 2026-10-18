@@ -198,6 +198,7 @@ const RUNWAY_PACE: WeeklyCreditPace = {
   headroomCredits: 420_000,
   burnRateRecentCreditsPerHour: 6_000,
   depletionEtaHours: 70,
+  projectedDepletionHours: 70,
   nextReliefInHours: 26,
   nextReliefCredits: 100_800,
   resetEvents: [
@@ -254,6 +255,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
           headroomPercent: 8,
           headroomCredits: 48_000,
           depletionEtaHours: 8,
+          projectedDepletionHours: 8,
           nextReliefInHours: 26,
         }}
       />,
@@ -274,6 +276,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
           ...RUNWAY_PACE,
           runwayStatus: "runs_dry",
           depletionEtaHours: 8,
+          projectedDepletionHours: 8,
           throttleToPercent: 28,
           addProAccounts: 2,
         }}
@@ -369,6 +372,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
         pace={{
           ...RUNWAY_PACE,
           depletionEtaHours: 8,
+          projectedDepletionHours: 8,
           nextReliefInHours: 12,
           resetEvents: [
             { at: new Date(Date.now() + 12 * 3_600_000).toISOString(), creditsReturned: 100_800 },
@@ -383,7 +387,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
   });
 
   it("does not crash on an ETA beyond the representable Date range", () => {
-    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, depletionEtaHours: 3e9 }} />);
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, depletionEtaHours: 3e9, projectedDepletionHours: 3e9 }} />);
 
     expect(screen.getByTestId("runway-timeline")).toBeInTheDocument();
     expect(screen.getByTestId("runway-eta-marker")).not.toHaveAttribute("title");
@@ -397,6 +401,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
           ...RUNWAY_PACE,
           burnRateRecentCreditsPerHour: 0,
           depletionEtaHours: null,
+          projectedDepletionHours: null,
         }}
       />,
     );
@@ -414,6 +419,7 @@ describe("WeeklyCreditsPaceCard runway layout", () => {
           ...RUNWAY_PACE,
           burnRateRecentCreditsPerHour: null,
           depletionEtaHours: null,
+          projectedDepletionHours: null,
         }}
       />,
     );
@@ -499,5 +505,31 @@ describe("weekly pace averaging controls", () => {
       burnWindowMinutes={5} onBurnWindowChange={vi.fn()} />);
     expect(screen.getByTestId("weekly-runway-verdict")).toHaveTextContent("No quota change observed");
     expect(screen.queryByText("Safe until reset")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("reset-aware runway numbers", () => {
+  it("shows modeled exhaustion after early relief rather than the raw ratio", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, runwayStatus: "runs_dry",
+      depletionEtaHours: 50.4, projectedDepletionHours: 101.8, nextReliefInHours: 1,
+      throttleToPercent: 59.9999999 }} />);
+    expect(screen.getByText("runs out in ~4d 5h")).toBeInTheDocument();
+    expect(screen.queryByText(/arrives after depletion/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("runway-recommendations")).toHaveTextContent("~59.99% of current load");
+  });
+
+  it("does not call a no-reset counterfactual actual depletion", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, depletionEtaHours: 126,
+      projectedDepletionHours: null }} />);
+    expect(screen.getByText("No depletion projected over two quota windows")).toBeInTheDocument();
+    expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("runway-eta-marker")).not.toBeInTheDocument();
+  });
+
+  it("qualifies a legacy response without projection metadata", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...RUNWAY_PACE, projectedDepletionHours: undefined }} />);
+    expect(screen.getByText("without resets: ~2d 22h left")).toBeInTheDocument();
+    expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
   });
 });

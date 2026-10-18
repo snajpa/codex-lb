@@ -90,8 +90,8 @@ def _build(
     ("used_percent", "reset_in_hours", "hourly_delta", "runway_status", "legacy_status"),
     [
         (90.0, 5.0, 10.0, "runs_dry", "danger"),
-        (80.0, 1.0, 10.0, "tight", "ahead"),
-        (20.0, 1.0, 1.0, "safe", "on_track"),
+        (80.0, 1.0, 0.55, "tight", "ahead"),
+        (20.0, 1.0, 0.1, "safe", "on_track"),
     ],
 )
 def test_weekly_pace_verdict_branches_and_legacy_status_mapping(
@@ -655,3 +655,104 @@ def test_stable_unchanged_interval_remains_measured_zero() -> None:
     assert pace.burn_rate_recent_credits_per_hour == 0
     assert pace.forecast_burn_rate_credits_per_hour == 0
     assert pace.depletion_eta_hours is None
+
+
+def test_throttle_respects_remaining_budget_before_reset() -> None:
+    name = "limited-budget"
+    pace = _build(
+        [_summary(name, used_percent=90, reset_in_hours=100)],
+        {name: [_row(name, 84, NOW - timedelta(hours=3)), _row(name, 90, NOW)]},
+    )
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(1008)
+    assert pace.projected_depletion_hours == pytest.approx(5)
+    assert pace.runway_status == "runs_dry"
+    assert pace.throttle_to_percent is not None
+    # 5040 remaining / 100 hours = 50.4/h, rather than nominal 300/h.
+    assert pace.throttle_to_percent == pytest.approx(5, abs=1e-7)
+    advised_rate = 1008 * pace.throttle_to_percent / 100
+    assert advised_rate <= 50.4
+    assert advised_rate * 100 <= pace.headroom_credits
+
+
+def test_earlier_noncohort_refill_prevents_false_exhaustion() -> None:
+    summaries = [
+        _summary("saturated-later", used_percent=99, reset_in_hours=100),
+        _summary("available-earlier", used_percent=80, reset_in_hours=1),
+    ]
+    histories = {
+        summary.account_id: [
+            _row(summary.account_id, used - 1.5, NOW - timedelta(hours=3)),
+            _row(summary.account_id, used, NOW),
+        ]
+        for summary, used in zip(summaries, [99, 80])
+    }
+    pace = _build(summaries, histories)
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(504)
+    assert pace.depletion_eta_hours == pytest.approx(21)
+    assert pace.next_relief_in_hours == pytest.approx(100)  # Informational saturated cohort.
+    assert pace.projected_depletion_hours is None
+    assert pace.projected_minimum_remaining_credits == pytest.approx(1008)
+    assert pace.runway_status == "tight"
+    assert pace.throttle_to_percent is None
+
+
+def test_exhaustion_after_first_refill_is_not_safe() -> None:
+    name = "later-exhaustion"
+    # 500/h; first reset restores 50400 after one hour, then lasts 100.8h.
+    pace = _build(
+        [_summary(name, used_percent=50, reset_in_hours=1)],
+        {name: [_row(name, 50 - 1500 / 504, NOW - timedelta(hours=3)), _row(name, 50, NOW)]},
+    )
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(500)
+    assert pace.depletion_eta_hours == pytest.approx(50.4)
+    assert pace.projected_depletion_hours == pytest.approx(101.8)
+    assert pace.runway_status == "runs_dry"
+    assert pace.throttle_to_percent is not None
+    assert pace.throttle_to_percent == pytest.approx(60, abs=1e-7)
+
+
+def test_discontinuity_gap_is_not_counted_as_zero_burn_time() -> None:
+    name = "reset-gap"
+    rows = [_row(name, 99, NOW - timedelta(hours=3)), _row(name, 1, NOW - timedelta(hours=1)), _row(name, 2, NOW)]
+    rows[0].reset_at = int(naive_utc_to_epoch(NOW - timedelta(hours=2)))
+    for row in rows[1:]:
+        row.reset_at = int(naive_utc_to_epoch(NOW + timedelta(hours=166)))
+    pace = _build([_summary(name, used_percent=2, reset_in_hours=166, capacity=189000)], {name: rows})
+    assert pace.burn_rate_recent_credits_per_hour == pytest.approx(1890)
+    assert pace.depletion_eta_hours == pytest.approx(98)
+    assert pace.runway_status == "runs_dry"
+
+
+def test_pre_reset_zero_does_not_measure_new_cycle_burn() -> None:
+    name = "new-cycle-singleton"
+    rows = [_row(name, 99, NOW - timedelta(hours=3)), _row(name, 99, NOW - timedelta(minutes=150)), _row(name, 10, NOW)]
+    rows[-1].reset_at = int(naive_utc_to_epoch(NOW + timedelta(hours=166)))
+    pace = _build([_summary(name, used_percent=10, reset_in_hours=166)], {name: rows})
+    assert pace.burn_rate_recent_credits_per_hour is None
+    assert pace.forecast_burn_rate_credits_per_hour is None
+    assert pace.throttle_to_percent is None
+
+
+@pytest.mark.parametrize("invalid", ["expired", "future"])
+def test_unavailable_cycle_balance_never_becomes_partial_fleet_pace(invalid: str) -> None:
+    summaries = [
+        _summary("current", used_percent=50, reset_in_hours=100),
+        _summary("invalid", used_percent=100, reset_in_hours=100),
+    ]
+    histories = {
+        "current": [_row("current", 44, NOW - timedelta(hours=3)), _row("current", 50, NOW)],
+        "invalid": [_row("invalid", 94, NOW - timedelta(hours=3)), _row("invalid", 100, NOW - timedelta(minutes=1))],
+    }
+    if invalid == "expired":
+        summaries[1].reset_at_secondary = NOW - timedelta(seconds=30)
+        histories["invalid"][-1].reset_at = int(naive_utc_to_epoch(NOW - timedelta(seconds=30)))
+    else:
+        histories["invalid"][-1].recorded_at = NOW + timedelta(seconds=60)
+    pace = build_weekly_credit_pace(
+        accounts=[_account(s.account_id) for s in summaries],
+        account_summaries=summaries,
+        secondary_history=histories,
+        now=NOW,
+        usage_refresh_interval_seconds=60,
+    )
+    assert pace is None
