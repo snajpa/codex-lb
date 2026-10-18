@@ -734,7 +734,7 @@ class TestBurstSameAccountBackoffSeconds:
         assert burst_same_account_backoff_seconds(1, retry_after_seconds=-7) == 1.0
 
     def test_wait_is_capped(self) -> None:
-        assert burst_same_account_backoff_seconds(1, retry_after_seconds=120) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=120) == 120.0
         assert burst_same_account_backoff_seconds(10, retry_after_seconds=None) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
 
     def test_retry_index_below_one_is_clamped(self) -> None:

@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
@@ -576,4 +578,31 @@ test("the model source edit dialog keeps Save visible in compact viewports", asy
   } finally {
     expect((await request.delete(`/api/model-sources/${source.id}`)).ok()).toBe(true);
   }
+});
+
+
+test("accounting dashboard retains upstream credit runway and every account row", async ({ page }) => {
+  // The harness owns this fresh localhost-only database; never seed production.
+  execFileSync("python3", [path.resolve("browser-smoke/seed_accounting.py")], { cwd: path.resolve(".."), env: process.env });
+  await page.addInitScript(() => localStorage.setItem("codex-lb-dashboard-account-view-mode", "list"));
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  await expect(page.getByTestId("quota-percentage-runway")).toHaveCount(0);
+  await expect(page.getByTestId("api-spend-projection")).toHaveCount(0);
+  await expect(page.getByTestId("weekly-runway-verdict")).toBeVisible();
+  await expect(page.getByText(/Account burn projection/)).toBeVisible();
+  await expect(page.getByText(/Active Conversations/)).toHaveCount(0);
+  await expect(page.getByTestId("account-list-row")).toHaveCount(12);
+  const body = page.getByTestId("dashboard-account-list").locator(":scope > div");
+  const geometry = await body.evaluate((element) => ({ maxHeight: getComputedStyle(element).maxHeight, client: element.clientHeight, scroll: element.scrollHeight }));
+  expect(geometry.maxHeight).toBe("none");
+  expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+  const directory = process.env.DASHBOARD_SCREENSHOT_OUTPUT_DIR;
+  if (directory) {
+    await page.screenshot({ path: path.join(directory, "dashboard-desktop.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: path.join(directory, "dashboard-mobile.png"), fullPage: true });
+  }
+  expect(failures).toEqual([]);
 });

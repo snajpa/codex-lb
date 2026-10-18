@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import re
 from copy import deepcopy
-from typing import Mapping, cast
+from typing import cast
 
 import pytest
 from hypothesis import given, settings
@@ -12,17 +11,12 @@ from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import (
-    _ESTIMATED_CHARS_PER_TOKEN,
-    _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     _UNSUPPORTED_UPSTREAM_FIELDS,
     ResponsesCompactRequest,
     ResponsesRequest,
-    _estimated_json_array_item_tokens,
-    _estimated_json_tokens,
     _input_image_file_reference,
     _sanitize_input_items,
     _strip_unsupported_fields,
-    _trim_compact_input_for_upstream,
     extract_input_file_ids,
     extract_input_image_file_references,
 )
@@ -1168,14 +1162,14 @@ def test_compact_strips_tool_fields():
     request = ResponsesCompactRequest.model_validate(payload)
 
     dumped = request.to_payload()
-    assert "tools" not in dumped
-    assert "tool_choice" not in dumped
-    assert dumped["parallel_tool_calls"] is False
+    assert dumped["tools"] == payload["tools"]
+    assert dumped["tool_choice"] == payload["tool_choice"]
+    assert dumped["parallel_tool_calls"] is True
     assert "text" not in dumped
 
 
-def test_responses_strips_poisoned_local_compact_fallback_items():
-    poisoned_message = {
+def test_responses_preserves_marker_matching_native_history():
+    retained_message = {
         "type": "message",
         "role": "assistant",
         "content": [
@@ -1185,27 +1179,24 @@ def test_responses_strips_poisoned_local_compact_fallback_items():
             }
         ],
     }
-    poisoned_compaction = {"type": "compaction", "encrypted_content": "bad-local-summary"}
+    capsule = {"type": "compaction", "encrypted_content": "opaque-native-window"}
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
         "input": [
             {"role": "user", "content": "before"},
-            poisoned_message,
-            poisoned_compaction,
+            retained_message,
+            capsule,
             {"role": "user", "content": "after"},
         ],
     }
 
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.to_payload()["input"] == [
-        {"role": "user", "content": "before"},
-        {"role": "user", "content": "after"},
-    ]
+    assert request.to_payload()["input"] == payload["input"]
 
 
-def test_compact_strips_poisoned_local_compact_fallback_items():
+def test_compact_preserves_marker_matching_validated_history():
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
@@ -1227,7 +1218,7 @@ def test_compact_strips_poisoned_local_compact_fallback_items():
 
     request = ResponsesCompactRequest.model_validate(payload)
 
-    assert request.to_payload()["input"] == [{"role": "user", "content": "continue"}]
+    assert request.to_payload()["input"] == payload["input"]
 
 
 def test_compact_does_not_trim_many_small_input_items_for_upstream():
@@ -1239,188 +1230,26 @@ def test_compact_does_not_trim_many_small_input_items_for_upstream():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input == input_items
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_many_small_items_include_array_wire_framing_in_budget():
+def test_compact_preserves_many_small_items_including_array_framing():
     input_items = [{"role": "user", "content": ""} for _ in range(14_285)]
 
-    dumped_input = ResponsesCompactRequest.model_validate(
+    normalized_request = ResponsesCompactRequest.model_validate(
         {
             "model": "gpt-5.1",
             "instructions": "hi",
             "input": input_items,
         }
-    ).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert len(dumped_input) < len(input_items)
-    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
-
-
-@given(input_items=json_arrays)
-@settings(max_examples=30, deadline=None)
-def test_compact_trim_leaves_budget_fitting_json_unchanged(input_items):
-    if _estimated_json_tokens(input_items) > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
-        return
-
-    payload = cast(dict[str, JsonValue], {"input": deepcopy(input_items)})
-    original = deepcopy(payload["input"])
-
-    _trim_compact_input_for_upstream(payload)
-
-    assert payload["input"] == original
-
-
-@given(size=st.integers(min_value=400_000, max_value=500_000))
-@settings(max_examples=8, deadline=None)
-def test_compact_trim_keeps_budget_order_and_is_stable(size):
-    input_items = [
-        {"id": "head", "role": "user", "content": "head"},
-        {"id": "middle", "role": "assistant", "content": "x" * size},
-        {"id": "latest", "role": "user", "content": "latest"},
-    ]
-    payload = cast(dict[str, JsonValue], {"input": input_items})
-
-    _trim_compact_input_for_upstream(payload)
-    trimmed_input = cast(list[JsonValue], deepcopy(payload["input"]))
-
-    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
-    retained_ids = [item["id"] for item in trimmed_input if isinstance(item, dict) and isinstance(item.get("id"), str)]
-    assert retained_ids == ["head", "latest"]
-
-    _trim_compact_input_for_upstream(payload)
-    assert payload["input"] == trimmed_input
-
-
-@given(size=st.integers(min_value=400_000, max_value=500_000))
-@settings(max_examples=8, deadline=None)
-def test_compact_trim_marker_accounts_for_omitted_middle_item(size):
-    input_items = [
-        {"id": "head", "role": "user", "content": "head"},
-        {"id": "middle", "role": "assistant", "content": "x" * size},
-        {"id": "latest", "role": "user", "content": "latest"},
-    ]
-    payload = cast(dict[str, JsonValue], {"input": input_items})
-
-    _trim_compact_input_for_upstream(payload)
-    trimmed_input = cast(list[JsonValue], payload["input"])
-
-    marker = next(
-        item
-        for item in trimmed_input
-        if isinstance(item, dict) and "[compact trim] Omitted " in str(item.get("content"))
     )
-    marker_text = str(marker["content"])
-    match = re.search(r"Omitted (\d+) input items \(~(\d+) estimated tokens\)", marker_text)
-
-    assert match is not None
-    assert match.groups() == ("1", str(_estimated_json_array_item_tokens(cast(JsonValue, input_items[1]))))
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-@given(
-    pair=st.sampled_from(
-        [
-            ("function_call", "function_call_output"),
-            ("custom_tool_call", "custom_tool_call_output"),
-            ("apply_patch_call", "apply_patch_call_output"),
-        ]
-    ),
-    filler_size=st.integers(min_value=300_000, max_value=400_000),
-)
-@settings(max_examples=8, deadline=None)
-def test_compact_trim_keeps_generated_tool_pairs(pair, filler_size):
-    call_type, output_type = pair
-    call = {
-        "type": call_type,
-        "name": "exec_command",
-        "call_id": "call-generated",
-        "arguments" if call_type == "function_call" else "input": "{}",
-    }
-    if call_type == "apply_patch_call":
-        call = {
-            "type": call_type,
-            "call_id": "call-generated",
-            "operation": {"patch": "noop"},
-        }
-    output = {"type": output_type, "call_id": "call-generated", "output": "result"}
-    payload = cast(
-        dict[str, JsonValue],
-        {
-            "input": [
-                {"role": "assistant", "content": "x" * filler_size},
-                call,
-                output,
-            ]
-        },
-    )
-
-    _trim_compact_input_for_upstream(payload)
-    trimmed_input = cast(list[JsonValue], payload["input"])
-
-    assert call in trimmed_input
-    assert output in trimmed_input
-    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
-
-
-@given(anchor=st.sampled_from(["goal", "plan"]), filler_size=st.integers(350_000, 450_000))
-@settings(max_examples=8, deadline=None)
-def test_compact_trim_keeps_generated_state_anchor(anchor, filler_size):
-    anchor_text = (
-        '<codex_internal_context source="goal">continue the goal</codex_internal_context>'
-        if anchor == "goal"
-        else "<collaboration_mode># Plan Mode"
-    )
-    anchor_item = {
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_text", "text": anchor_text}],
-    }
-    payload = cast(
-        dict[str, JsonValue],
-        {
-            "input": [
-                {"role": "user", "content": "head"},
-                {"role": "assistant", "content": "x" * filler_size},
-                anchor_item,
-                {"role": "user", "content": "latest"},
-            ]
-        },
-    )
-
-    _trim_compact_input_for_upstream(payload)
-    trimmed_input = cast(list[JsonValue], payload["input"])
-
-    assert anchor_item in trimmed_input
-    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
-
-
-@given(size=st.integers(min_value=400_000, max_value=500_000))
-@settings(max_examples=8, deadline=None)
-def test_compact_trim_rejects_generated_oversized_latest_item(size):
-    payload = cast(
-        dict[str, JsonValue],
-        {
-            "input": [
-                {"role": "assistant", "content": "head"},
-                {"role": "user", "content": "x" * size},
-            ]
-        },
-    )
-
-    with pytest.raises(ClientPayloadError) as raised:
-        _trim_compact_input_for_upstream(payload)
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
-
-
-def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_marker():
+def test_compact_preserves_oversized_input_by_estimated_tokens_with_head_tail_and_marker():
     input_items = [
         {"role": "user", "content": "initial goal and instructions"},
         {"role": "assistant", "content": "x" * 500_000},
@@ -1434,25 +1263,12 @@ def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_ma
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input[0] == input_items[0]
-    assert dumped_input[-2:] == input_items[-2:]
-    marker = cast(Mapping[str, object], dumped_input[1])
-    assert marker["type"] == "message"
-    assert marker["role"] == "user"
-    content = cast(list[Mapping[str, str]], marker["content"])
-    marker_text = content[0]["text"]
-    assert marker_text.startswith("[compact trim] Omitted 1 input items")
-    assert "estimated tokens" in marker_text
-    assert "Required compact state anchors and retained input items remain in their original order" in marker_text
-    assert "most recent context" not in marker_text
-    assert "codex-lb" not in marker_text
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_oversized_responses_lite_prefix():
+def test_compact_preserves_preserves_oversized_responses_lite_prefix():
     additional_tools = {
         "type": "additional_tools",
         "role": "developer",
@@ -1485,14 +1301,12 @@ def test_compact_trimming_preserves_oversized_responses_lite_prefix():
         }
     )
 
-    dumped_input = request.to_payload()["input"]
-    assert isinstance(dumped_input, list)
-    assert dumped_input[0:2] == [additional_tools, developer_instructions]
-    assert input_items[2] not in dumped_input
-    assert dumped_input[-1] == input_items[-1]
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_role_only_responses_lite_developer_message():
+def test_compact_preserves_preserves_role_only_responses_lite_developer_message():
     additional_tools = {
         "type": "additional_tools",
         "role": "developer",
@@ -1513,14 +1327,12 @@ def test_compact_trimming_preserves_role_only_responses_lite_developer_message()
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert additional_tools in dumped_input
-    assert developer_message in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
+def test_compact_preserves_responses_lite_prelude_that_exceeds_upstream_limit():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1551,14 +1363,12 @@ def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
 
     request = ResponsesCompactRequest.model_validate(payload)
 
-    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
-        request.to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_drops_optional_head_context_when_required_selection_fits():
+def test_compact_preserves_optional_head_context_when_required_selection_fits():
     input_items = [
         {
             "type": "additional_tools",
@@ -1578,17 +1388,12 @@ def test_compact_drops_optional_head_context_when_required_selection_fits():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped_input = request.to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert input_items[2] not in dumped_input
-    for required_item in (input_items[0], input_items[1], input_items[4], input_items[5]):
-        assert required_item in dumped_input
-    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_oversized_leading_item():
+def test_compact_preserves_retains_oversized_leading_item():
     input_items = [
         {"role": "assistant", "content": "x" * 500_000},
         {"role": "user", "content": "latest request"},
@@ -1600,19 +1405,12 @@ def test_compact_trimming_drops_oversized_leading_item():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input[-1] == input_items[-1]
-    assert input_items[0] not in dumped_input
-    marker = cast(Mapping[str, object], dumped_input[0])
-    assert marker["type"] == "message"
-    content = cast(list[Mapping[str, str]], marker["content"])
-    assert content[0]["text"].startswith("[compact trim] Omitted 1 input items")
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_rejects_oversized_latest_item():
+def test_compact_preserves_retains_oversized_latest_item():
     input_items = [
         {"role": "user", "content": "initial instructions"},
         {"role": "assistant", "content": "middle context " + "y" * 500_000},
@@ -1626,14 +1424,12 @@ def test_compact_trimming_rejects_oversized_latest_item():
 
     request = ResponsesCompactRequest.model_validate(payload)
 
-    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
-        request.to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_inline_image_from_required_latest_tool_output():
+def test_compact_preserves_retains_inline_image_from_required_latest_tool_output():
     latest_call = {
         "type": "custom_tool_call",
         "name": "view_image",
@@ -1662,29 +1458,12 @@ def test_compact_trimming_elides_inline_image_from_required_latest_tool_output()
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert latest_call in dumped_input
-    dumped_output = next(
-        item for item in dumped_input if isinstance(item, dict) and item.get("type") == "custom_tool_call_output"
-    )
-    assert dumped_output["output"] == [
-        {"type": "input_text", "text": "Image Size: 1512x982."},
-        {
-            "type": "input_text",
-            "text": (
-                "[compact trim] Omitted inline image bytes that were already observed before compaction "
-                "(500022 encoded characters)."
-            ),
-        },
-    ]
-    assert "data:image/png;base64" not in json.dumps(dumped_input)
-    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_mapping_shaped_required_tool_image_output():
+def test_compact_preserves_retains_mapping_shaped_required_tool_image_output():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1706,20 +1485,12 @@ def test_compact_trimming_elides_mapping_shaped_required_tool_image_output():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    dumped_output = cast(Mapping[str, object], dumped_input[-1])
-    assert dumped_output["output"] == {
-        "type": "input_text",
-        "text": (
-            "[compact trim] Omitted inline image bytes that were already observed before compaction "
-            "(500022 encoded characters)."
-        ),
-    }
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_percent_encoded_image_url_in_string_output():
+def test_compact_preserves_retains_percent_encoded_image_url_in_string_output():
     image_url = "data:image/svg+xml,%3Csvg%3E" + "%20" * 170_000 + "%3C/svg%3E"
     payload = {
         "model": "gpt-5.6-sol",
@@ -1734,13 +1505,12 @@ def test_compact_trimming_elides_percent_encoded_image_url_in_string_output():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
-    assert "data:image/svg+xml" not in json.dumps(dumped_input)
-    assert "Omitted inline image bytes" in json.dumps(dumped_input)
 
-
-def test_compact_trimming_prefers_lossless_context_trim_before_inline_image_elision():
+def test_compact_preserves_prefers_lossless_context_trim_before_inline_image_elision():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1755,16 +1525,12 @@ def test_compact_trimming_prefers_lossless_context_trim_before_inline_image_elis
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input[0] != payload["input"][0]
-    assert "data:image/png;base64" in json.dumps(dumped_input)
-    assert "Omitted inline image bytes" not in json.dumps(dumped_input)
-    assert any(isinstance(item, dict) and item.get("type") == "message" for item in dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_structured_chat_image_url_as_text_part():
+def test_compact_preserves_retains_structured_chat_image_url_as_text_part():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1783,22 +1549,12 @@ def test_compact_trimming_elides_structured_chat_image_url_as_text_part():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    dumped_output = cast(Mapping[str, object], dumped_input[-1])
-    assert dumped_output["output"] == [
-        {
-            "type": "text",
-            "text": (
-                "[compact trim] Omitted inline image bytes that were already observed before compaction "
-                "(500022 encoded characters)."
-            ),
-        }
-    ]
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_bare_chat_image_url_as_text_part():
+def test_compact_preserves_retains_bare_chat_image_url_as_text_part():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1817,22 +1573,12 @@ def test_compact_trimming_elides_bare_chat_image_url_as_text_part():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    dumped_output = cast(Mapping[str, object], dumped_input[-1])
-    assert dumped_output["output"] == [
-        {
-            "type": "text",
-            "text": (
-                "[compact trim] Omitted inline image bytes that were already observed before compaction "
-                "(500022 encoded characters)."
-            ),
-        }
-    ]
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_accepted_file_reference_while_eliding_inline_image():
+def test_compact_preserves_keeps_accepted_file_reference_while_eliding_inline_image():
     file_reference = {"type": "input_file", "file_id": "file-canvas"}
     payload = {
         "model": "gpt-5.6-sol",
@@ -1850,15 +1596,12 @@ def test_compact_trimming_keeps_accepted_file_reference_while_eliding_inline_ima
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    latest_item = cast(Mapping[str, object], dumped_input[-1])
-    assert file_reference in cast(list[object], latest_item["output"])
-    assert "data:image/png;base64" not in json.dumps(dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_hosted_computer_screenshot_fail_closed():
+def test_compact_preserves_keeps_hosted_computer_screenshot_fail_closed():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1879,14 +1622,12 @@ def test_compact_trimming_keeps_hosted_computer_screenshot_fail_closed():
         ],
     }
 
-    with pytest.raises(ClientPayloadError) as raised:
-        ResponsesCompactRequest.model_validate(payload).to_payload()
-
-    assert raised.value.code == "responses_compact_input_too_large"
-    assert raised.value.param == "input"
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_elides_data_url_inside_string_tool_output():
+def test_compact_preserves_retains_data_url_inside_string_tool_output():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1900,18 +1641,12 @@ def test_compact_trimming_elides_data_url_inside_string_tool_output():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    dumped_output = cast(Mapping[str, object], dumped_input[-1])
-    output = cast(str, dumped_output["output"])
-    assert output.startswith("prefix ")
-    assert output.endswith(" suffix")
-    assert "Omitted inline image bytes" in output
-    assert "data:image/png;base64" not in output
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_latest_unobserved_user_inline_image():
+def test_compact_preserves_keeps_latest_unobserved_user_inline_image():
     latest_image = {
         "type": "input_image",
         "image_url": "data:image/png;base64,AAAA",
@@ -1925,15 +1660,12 @@ def test_compact_trimming_keeps_latest_unobserved_user_inline_image():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    latest_item = cast(Mapping[str, object], dumped_input[-1])
-    assert latest_image in cast(list[object], latest_item["content"])
-    assert "Omitted inline image bytes" not in json.dumps(dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_latest_unmatched_tool_call():
+def test_compact_preserves_preserves_latest_unmatched_tool_call():
     latest_call = {
         "type": "function_call",
         "name": "exec",
@@ -1949,13 +1681,12 @@ def test_compact_trimming_preserves_latest_unmatched_tool_call():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
-    assert isinstance(dumped_input, list)
-    assert latest_call in dumped_input
 
-
-def test_compact_trimming_omits_latest_non_state_tool_pair_when_it_cannot_fit():
+def test_compact_preserves_omits_latest_non_state_tool_pair_when_it_cannot_fit():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1975,19 +1706,12 @@ def test_compact_trimming_omits_latest_non_state_tool_pair_when_it_cannot_fit():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert payload["input"][0] not in dumped_input
-    assert payload["input"][2] not in dumped_input
-    assert any(
-        isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
-        for item in dumped_input
-    )
-    assert "most recent context" not in json.dumps(dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_omits_latest_non_state_tool_pair_when_marker_would_overflow_budget():
+def test_compact_preserves_omits_latest_non_state_tool_pair_when_marker_would_overflow_budget():
     call = {
         "type": "function_call",
         "name": "read_file",
@@ -2009,19 +1733,16 @@ def test_compact_trimming_omits_latest_non_state_tool_pair_when_marker_would_ove
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert call not in dumped_input
-    assert output not in dumped_input
-    assert any("[compact trim]" in str(item) for item in dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
 @pytest.mark.parametrize(
     ("anchor_field", "anchor_value"),
     [("previous_response_id", "resp_anchor"), ("conversation", "conv_anchor")],
 )
-def test_compact_trimming_preserves_latest_anchored_output_without_matching_call(
+def test_compact_preserves_preserves_latest_anchored_output_without_matching_call(
     anchor_field: str,
     anchor_value: str,
 ):
@@ -2040,10 +1761,9 @@ def test_compact_trimming_preserves_latest_anchored_output_without_matching_call
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert output in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
 def _compact_call_item(item_type: str, call_id: str) -> dict[str, JsonValue]:
@@ -2074,7 +1794,7 @@ def _compact_call_item(item_type: str, call_id: str) -> dict[str, JsonValue]:
         ("apply_patch_call", "custom_tool_call_output"),
     ],
 )
-def test_compact_anchored_output_ignores_reused_call_id_from_incompatible_tool_variant(
+def test_compact_preserves_anchored_output_includes_reused_call_id_from_incompatible_tool_variant(
     supplied_call_type: str,
     terminal_output_type: str,
 ):
@@ -2096,11 +1816,9 @@ def test_compact_anchored_output_ignores_reused_call_id_from_incompatible_tool_v
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert terminal_output in dumped_input
-    assert supplied_call not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
 @pytest.mark.parametrize(
@@ -2111,7 +1829,7 @@ def test_compact_anchored_output_ignores_reused_call_id_from_incompatible_tool_v
         ("apply_patch_call", "function_call", "apply_patch_call_output"),
     ],
 )
-def test_compact_reused_call_id_selects_type_compatible_pair(
+def test_compact_preserves_reused_call_id_type_compatible_pair(
     matching_call_type: str,
     intervening_call_type: str,
     terminal_output_type: str,
@@ -2136,12 +1854,9 @@ def test_compact_reused_call_id_selects_type_compatible_pair(
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert matching_call in dumped_input
-    assert terminal_output in dumped_input
-    assert intervening_call not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
 @pytest.mark.parametrize(
@@ -2151,7 +1866,7 @@ def test_compact_reused_call_id_selects_type_compatible_pair(
         ("function_call", "custom_tool_call_output"),
     ],
 )
-def test_compact_rejects_oversized_anchored_output_with_only_incompatible_supplied_call(
+def test_compact_preserves_oversized_anchored_output_with_only_incompatible_supplied_call(
     supplied_call_type: str,
     terminal_output_type: str,
 ):
@@ -2168,14 +1883,12 @@ def test_compact_rejects_oversized_anchored_output_with_only_incompatible_suppli
         "input": [supplied_call, terminal_output],
     }
 
-    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
-        ResponsesCompactRequest.model_validate(payload).to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_rejects_oversized_anchored_output_when_reused_call_id_is_already_consumed():
+def test_compact_preserves_oversized_anchored_output_when_reused_call_id_is_already_consumed():
     historical_call = _compact_call_item("function_call", "call-reused")
     historical_output = {
         "type": "function_call_output",
@@ -2194,14 +1907,12 @@ def test_compact_rejects_oversized_anchored_output_when_reused_call_id_is_alread
         "input": [historical_call, historical_output, {"role": "assistant", "content": "middle"}, terminal_output],
     }
 
-    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
-        ResponsesCompactRequest.model_validate(payload).to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_anchored_output_does_not_reattach_consumed_reused_call_pair():
+def test_compact_preserves_anchored_output_retains_consumed_reused_call_pair():
     historical_call = _compact_call_item("function_call", "call-reused")
     historical_output = {
         "type": "function_call_output",
@@ -2220,15 +1931,12 @@ def test_compact_anchored_output_does_not_reattach_consumed_reused_call_pair():
         "input": [historical_call, historical_output, {"role": "assistant", "content": "middle"}, terminal_output],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert terminal_output in dumped_input
-    assert historical_call not in dumped_input
-    assert historical_output not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_anchored_output_does_not_reattach_small_consumed_pair():
+def test_compact_preserves_anchored_output_retains_small_consumed_pair():
     historical_call = _compact_call_item("function_call", "call-reused-small")
     historical_output = {
         "type": "function_call_output",
@@ -2247,15 +1955,12 @@ def test_compact_anchored_output_does_not_reattach_small_consumed_pair():
         "input": [historical_call, historical_output, {"role": "assistant", "content": "x" * 500_000}, terminal_output],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert terminal_output in dumped_input
-    assert historical_call not in dumped_input
-    assert historical_output not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_rejects_oversized_latest_apply_patch_pair():
+def test_compact_preserves_retains_oversized_latest_apply_patch_pair():
     call = {
         "type": "apply_patch_call",
         "call_id": "call-side-effect",
@@ -2276,14 +1981,12 @@ def test_compact_trimming_rejects_oversized_latest_apply_patch_pair():
         ],
     }
 
-    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
-        ResponsesCompactRequest.model_validate(payload).to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_latest_non_state_tool_pair_when_it_fits():
+def test_compact_preserves_keeps_latest_non_state_tool_pair_when_it_fits():
     call = {
         "type": "function_call",
         "name": "read_file",
@@ -2305,14 +2008,12 @@ def test_compact_trimming_keeps_latest_non_state_tool_pair_when_it_fits():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert call in dumped_input
-    assert output in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_omits_oversized_latest_custom_tool_output():
+def test_compact_preserves_omits_oversized_latest_custom_tool_output():
     call = {
         "type": "custom_tool_call",
         "name": "read_file",
@@ -2334,16 +2035,12 @@ def test_compact_trimming_omits_oversized_latest_custom_tool_output():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert call not in dumped_input
-    assert output not in dumped_input
-    assert dumped_input[0] == payload["input"][0]
-    assert any("[compact trim]" in str(item) for item in dumped_input)
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
+def test_compact_retains_unicode_item_that_expands_past_wire_budget():
     def request_with_content(content: str) -> ResponsesCompactRequest:
         return ResponsesCompactRequest.model_validate(
             {
@@ -2353,16 +2050,12 @@ def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
             }
         )
 
-    assert request_with_content("x" * 40_000).to_payload()["input"]
-
-    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
-        request_with_content("😀" * 40_000).to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    normalized_request = request_with_content("x" * 40_000)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
+def test_compact_preserves_preserves_codex_goal_context_anchor_from_middle():
     goal_context = {
         "type": "message",
         "role": "user",
@@ -2392,16 +2085,12 @@ def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input[0] == input_items[0]
-    assert goal_context in dumped_input
-    assert dumped_input[-1] == input_items[-1]
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_non_message_developer_directive_from_middle():
+def test_compact_preserves_preserves_non_message_developer_directive_from_middle():
     developer_directive = {
         "type": "future_directive",
         "role": "developer",
@@ -2423,19 +2112,12 @@ def test_compact_trimming_preserves_non_message_developer_directive_from_middle(
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert dumped_input[0] == input_items[0]
-    assert developer_directive in dumped_input
-    assert dumped_input[-1] == input_items[-1]
-    # Trimming actually occurred: the oversized filler items were dropped.
-    assert input_items[1] not in dumped_input
-    assert input_items[3] not in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
+def test_compact_preserves_preserves_plan_and_goal_tool_call_outputs():
     update_plan_call = {
         "type": "function_call",
         "name": "update_plan",
@@ -2467,16 +2149,12 @@ def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert update_plan_call in dumped_input
-    assert update_plan_output in dumped_input
-    assert unrelated_output not in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_preserves_historical_side_effect_tool_pair():
+def test_compact_preserves_preserves_historical_side_effect_tool_pair():
     pr_create_call = {
         "type": "function_call",
         "name": "exec_command",
@@ -2507,17 +2185,13 @@ def test_compact_trimming_preserves_historical_side_effect_tool_pair():
         "input": input_items,
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert pr_create_call in dumped_input
-    assert pr_create_output in dumped_input
-    assert input_items[1] not in dumped_input
-    assert input_items[4] not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
 @pytest.mark.parametrize("tool_name", ["exec", "collaboration"])
-def test_compact_trimming_preserves_historical_code_mode_side_effect_pair(tool_name: str):
+def test_compact_preserves_preserves_historical_code_mode_side_effect_pair(tool_name: str):
     side_effect_call = {
         "type": "custom_tool_call",
         "name": tool_name,
@@ -2543,15 +2217,12 @@ def test_compact_trimming_preserves_historical_code_mode_side_effect_pair(tool_n
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert side_effect_call in dumped_input
-    assert side_effect_output in dumped_input
-    assert ordinary_tail not in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_side_effect_call_without_a_usable_pair_key():
+def test_compact_preserves_retains_side_effect_call_without_a_usable_pair_key():
     orphaned_side_effect_call = {
         "type": "custom_tool_call",
         "name": "exec",
@@ -2568,13 +2239,12 @@ def test_compact_trimming_drops_side_effect_call_without_a_usable_pair_key():
         ],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
-    assert isinstance(dumped_input, list)
-    assert orphaned_side_effect_call not in dumped_input
 
-
-def test_compact_trimming_never_emits_unkeyed_side_effect_from_ordinary_head_retention():
+def test_compact_preserves_never_emits_unkeyed_side_effect_from_ordinary_head_retention():
     orphaned_side_effect_call = {
         "type": "custom_tool_call",
         "name": "exec",
@@ -2584,15 +2254,14 @@ def test_compact_trimming_never_emits_unkeyed_side_effect_from_ordinary_head_ret
     latest = {"role": "user", "content": "continue after compaction"}
     input_items = [orphaned_side_effect_call, filler, latest]
 
-    dumped_input = ResponsesCompactRequest.model_validate(
+    normalized_request = ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
-    ).to_payload()["input"]
+    )
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
-    assert isinstance(dumped_input, list)
-    assert orphaned_side_effect_call not in dumped_input
 
-
-def test_compact_trimming_rejects_unkeyed_required_latest_side_effect():
+def test_compact_preserves_retains_unkeyed_required_latest_side_effect():
     orphaned_side_effect_call = {
         "type": "custom_tool_call",
         "name": "exec",
@@ -2610,14 +2279,12 @@ def test_compact_trimming_rejects_unkeyed_required_latest_side_effect():
         }
     )
 
-    with pytest.raises(ClientPayloadError) as exc_info:
-        request.to_payload()
-
-    assert exc_info.value.code == "responses_compact_input_too_large"
-    assert exc_info.value.param == "input"
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_final_wire_fit_drops_side_effect_pairs_atomically():
+def test_compact_preserves_final_wire_retains_side_effect_pairs_atomically():
     pairs: list[tuple[JsonValue, JsonValue]] = []
     input_items: list[JsonValue] = []
     for index in range(3):
@@ -2638,17 +2305,14 @@ def test_compact_final_wire_fit_drops_side_effect_pairs_atomically():
     latest = {"role": "user", "content": "continue after compaction"}
     input_items.append(latest)
 
-    dumped_input = ResponsesCompactRequest.model_validate(
+    normalized_request = ResponsesCompactRequest.model_validate(
         {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
-    ).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert latest in dumped_input
-    assert all((call in dumped_input) == (output in dumped_input) for call, output in pairs)
-    assert _estimated_json_tokens(dumped_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+    )
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_optional_head_before_historical_side_effect_pair():
+def test_compact_preserves_retains_optional_head_before_historical_side_effect_pair():
     side_effect_call = {
         "type": "custom_tool_call",
         "name": "exec",
@@ -2668,16 +2332,12 @@ def test_compact_trimming_drops_optional_head_before_historical_side_effect_pair
         "input": [optional_head, side_effect_call, side_effect_output, latest_request],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert side_effect_call in dumped_input
-    assert side_effect_output in dumped_input
-    assert optional_head not in dumped_input
-    assert latest_request in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_old_side_effect_pairs_when_anchor_set_exceeds_budget():
+def test_compact_preserves_retains_old_side_effect_pairs_when_anchor_set_exceeds_budget():
     input_items: list[JsonValue] = [{"role": "user", "content": "initial request"}]
     old_side_effect_pairs: list[tuple[JsonValue, JsonValue]] = []
     for index in range(14):
@@ -2713,18 +2373,12 @@ def test_compact_trimming_drops_old_side_effect_pairs_when_anchor_set_exceeds_bu
         "input": input_items,
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert latest_call in dumped_input
-    assert latest_output in dumped_input
-    assert latest_request in dumped_input
-    assert any(call not in dumped_input and output not in dumped_input for call, output in old_side_effect_pairs)
-    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
+def test_compact_preserves_state_anchor_matches_duplicate_call_id_by_occurrence():
     historical_call = {
         "type": "function_call",
         "name": "read_file",
@@ -2754,16 +2408,12 @@ def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
         "input": [historical_call, historical_output, state_call, state_output, latest],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert historical_output not in dumped_input
-    assert state_call in dumped_input
-    assert state_output in dumped_input
-    assert latest in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budget():
+def test_compact_preserves_retains_optional_tool_pair_when_markers_exceed_budget():
     optional_call = {
         "type": "function_call",
         "name": "exec",
@@ -2791,19 +2441,12 @@ def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budge
         "input": [optional_call, optional_output, omitted, first_anchor, omitted, second_anchor, latest],
     }
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert optional_call not in dumped_input
-    assert optional_output not in dumped_input
-    assert first_anchor in dumped_input
-    assert second_anchor in dumped_input
-    assert latest in dumped_input
-    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
-    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_backtracking_keeps_code_mode_pair_before_optional_head_context():
+def test_compact_preserves_keeps_code_mode_pair_before_optional_head_context():
     optional_head = {"role": "user", "content": "h" * 2_300}
     optional_call = {
         "type": "function_call",
@@ -2831,17 +2474,12 @@ def test_compact_backtracking_keeps_code_mode_pair_before_optional_head_context(
     input_items.append(latest)
     payload = {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
 
-    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
-
-    assert isinstance(dumped_input, list)
-    assert optional_head not in dumped_input
-    assert optional_call in dumped_input
-    assert optional_output in dumped_input
-    assert all(anchor in dumped_input for anchor in anchors)
-    assert latest in dumped_input
+    normalized_request = ResponsesCompactRequest.model_validate(payload)
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():
+def test_compact_preserves_keeps_selected_tool_outputs_with_matching_calls():
     tool_call = {
         "type": "function_call",
         "name": "lookup",
@@ -2868,15 +2506,12 @@ def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert tool_call in dumped_input
-    assert tool_output in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_keeps_selected_tool_calls_with_matching_outputs():
+def test_compact_preserves_keeps_selected_tool_calls_with_matching_outputs():
     tool_call = {
         "type": "function_call",
         "name": "lookup",
@@ -2902,15 +2537,12 @@ def test_compact_trimming_keeps_selected_tool_calls_with_matching_outputs():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert tool_call in dumped_input
-    assert tool_output in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_reconciles_duplicate_tool_call_ids_by_occurrence():
+def test_compact_preserves_reconciles_duplicate_tool_call_ids_by_occurrence():
     first_tool_call = {
         "type": "function_call",
         "name": "shell",
@@ -2948,17 +2580,12 @@ def test_compact_trimming_reconciles_duplicate_tool_call_ids_by_occurrence():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert first_tool_call not in dumped_input
-    assert first_tool_output not in dumped_input
-    assert latest_tool_call in dumped_input
-    assert latest_tool_output in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_head_tool_call_when_output_exceeds_budget():
+def test_compact_preserves_retains_head_tool_call_when_output_exceeds_budget():
     tool_call = {
         "type": "function_call",
         "name": "lookup",
@@ -2983,16 +2610,12 @@ def test_compact_trimming_drops_head_tool_call_when_output_exceeds_budget():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert tool_call not in dumped_input
-    assert tool_output not in dumped_input
-    assert dumped_input[-1] == input_items[-1]
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_selected_tool_outputs_without_matching_calls():
+def test_compact_preserves_retains_selected_tool_outputs_without_matching_calls():
     orphan_output = {
         "type": "function_call_output",
         "call_id": "call_missing",
@@ -3012,14 +2635,12 @@ def test_compact_trimming_drops_selected_tool_outputs_without_matching_calls():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert orphan_output not in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_compact_trimming_drops_selected_tool_calls_without_matching_outputs():
+def test_compact_preserves_retains_selected_tool_calls_without_matching_outputs():
     orphan_call = {
         "type": "function_call",
         "name": "lookup",
@@ -3039,14 +2660,12 @@ def test_compact_trimming_drops_selected_tool_calls_without_matching_outputs():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
-
-    assert isinstance(dumped_input, list)
-    assert orphan_call not in dumped_input
+    normalized_request = request
+    before = deepcopy(normalized_request.input)
+    assert normalized_request.to_payload()["input"] == before
 
 
-def test_v1_compact_strips_tool_fields():
+def test_v1_compact_preserves_native_tool_fields():
     payload = {
         "model": "gpt-5.1",
         "input": "hello",
@@ -3057,9 +2676,9 @@ def test_v1_compact_strips_tool_fields():
     request = V1ResponsesCompactRequest.model_validate(payload).to_compact_request()
 
     dumped = request.to_payload()
-    assert "tools" not in dumped
-    assert "tool_choice" not in dumped
-    assert dumped["parallel_tool_calls"] is False
+    assert dumped["tools"] == payload["tools"]
+    assert dumped["tool_choice"] == payload["tool_choice"]
+    assert dumped["parallel_tool_calls"] is True
 
 
 def test_v1_compact_messages_convert():
@@ -3488,3 +3107,11 @@ def test_extract_input_image_file_references_collects_tool_output_paths():
         (0, None, "file_tool"),
         (0, None, "file_nested"),
     ]
+
+
+@given(json_arrays)
+@settings(max_examples=40)
+def test_compact_preserves_validated_generated_history(items):
+    request = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": items})
+    before = deepcopy(request.input)
+    assert request.to_payload()["input"] == before

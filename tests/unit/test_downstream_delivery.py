@@ -613,3 +613,67 @@ def test_outcome_label_set_is_closed() -> None:
         "ended_without_terminal",
     }
     assert "stream_terminal_delivery_total" in prometheus.__all__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backpressure, expected_sleep", [(25.0, [5.0]), (31.0, []), (32.0, [])])
+async def test_capacity_wait_clips_sleep_after_downstream_writer_backpressure(
+    monkeypatch: pytest.MonkeyPatch, backpressure: float, expected_sleep: list[float]
+) -> None:
+    from app.core.clock import RealScheduler
+    from app.modules.proxy._service.streaming import retry as retry_module
+    from tests.simulation.virtual_time import VirtualClock
+
+    clock = VirtualClock(monotonic_value=100.0)
+    sleeps: list[float] = []
+    sent: list[dict[str, object]] = []
+
+    class AdvancingScheduler(RealScheduler):
+        async def sleep(self, delay: float, result: Any = None) -> Any:
+            sleeps.append(delay)
+            clock.advance(delay)
+            return result
+
+    monkeypatch.setattr(retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 10.0)
+    body = retry_module._iter_account_capacity_recovery_wait(
+        request_id="req_capacity_backpressure",
+        model="gpt-5.5",
+        account_id="account-capacity-backpressure",
+        error_message="Account stream capacity is exhausted",
+        recovery_sleep_seconds=30.0,
+        remaining_budget_seconds=32.0,
+        emit_keepalives=True,
+        stage="selection",
+        scheduler=AdvancingScheduler(),
+        clock=clock,
+    )
+    response = DeliveryTracedStreamingResponse(body, surface="responses")
+    held = False
+
+    async def receive() -> dict[str, object]:
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        nonlocal held
+        if message["type"] == "http.response.body" and message.get("body") and not held:
+            held = True
+            # This is time spent inside the real downstream writer while the
+            # actual recovery generator is suspended at its yielded keepalive.
+            clock.advance(backpressure)
+            await asyncio.sleep(0)
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "method": "POST",
+        "path": "/v1/responses",
+        "state": {},
+    }
+    await response(cast(Any, scope), cast(Any, receive), cast(Any, send))
+    assert held, "the downstream keepalive was never delivered"
+    assert sleeps == expected_sleep, "backpressure bought an extra sleep past the wait deadline"
+    assert clock.monotonic() == pytest.approx(100.0 + max(30.0, backpressure))
+    assert sent[-1]["type"] == "http.response.body" and sent[-1].get("more_body") is False
+    assert response.outcome == OUTCOME_ENDED_WITHOUT_TERMINAL

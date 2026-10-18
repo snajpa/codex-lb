@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from collections.abc import AsyncIterator, Iterator, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,6 +19,7 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.downstream_delivery as downstream_delivery_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.clock import RealScheduler
 from app.core.config.settings import Settings
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.openai.models import CompactResponsePayload
@@ -36,6 +39,176 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("budget", [12.0, 75.0])
+@pytest.mark.asyncio
+async def test_owner_bound_burst_retry_after_above_backoff_cap_on_http_routes(
+    async_client, app_instance, monkeypatch, path: str, budget: float
+):
+    from app.dependencies import get_proxy_service_for_app
+    from tests.simulation.virtual_time import VirtualClock
+
+    raw_account_id = "acc_http_burst_long_cooldown"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, "long-cooldown@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert response.status_code == 200
+    clock = VirtualClock(monotonic_value=5_000.0)
+
+    class AdvancingScheduler(RealScheduler):
+        async def sleep(self, delay: float, result=None):
+            clock.advance(delay)
+            return result
+
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(service, "_clock", clock)
+    monkeypatch.setattr(service, "_scheduler", AdvancingScheduler())
+    monkeypatch.setattr(service._load_balancer, "_clock", clock)
+    monkeypatch.setattr(proxy_module, "_stream_request_budget_seconds", lambda *_a, **_k: budget)
+    attempts: list[tuple[float, str | None]] = []
+
+    async def upstream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append((clock.monotonic(), account_id))
+        if len(attempts) == 1:
+            raise proxy_client_module.ProxyResponseError(
+                429, {"error": {"message": "Rate limit exceeded"}}, retry_after_seconds=18
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_long_cooldown","output":[]}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    response = await async_client.post(
+        path,
+        headers={"accept": "text/event-stream", "user-agent": "codex-cli/1.0"},
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [{"type": "reasoning", "id": "rs_owner", "encrypted_content": "owner-bound"}],
+            "stream": True,
+        },
+    )
+
+    if budget == 12.0:
+        assert attempts == [(5_000.0, raw_account_id)], "redispatched before cooldown despite exhausted budget"
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "18"
+        assert response.json()["error"]["message"] == "Rate limit exceeded"
+    else:
+        assert attempts == [(5_000.0, raw_account_id), (5_018.0, raw_account_id)]
+        assert response.status_code == 200
+        events = list(_iter_sse_events(response.text.splitlines()))
+        assert any(event.get("type") == "response.completed" for event in events)
+        assert not any(event.get("type") == "response.failed" for event in events)
+
+
+@pytest.mark.parametrize("backpressure, expected_sleep", [(25.0, [5.0]), (31.0, [])])
+@pytest.mark.asyncio
+async def test_native_capacity_recovery_reserves_retry_budget_after_writer_backpressure(
+    async_client, app_instance, monkeypatch, backpressure: float, expected_sleep: list[float]
+):
+    from app.dependencies import get_proxy_service_for_app
+    from tests.integration.model_source_helpers import _AsgiStream
+    from tests.simulation.virtual_time import VirtualClock
+
+    raw_account_id = "acc_capacity_downstream_backpressure"
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(raw_account_id, "capacity@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    clock = VirtualClock(monotonic_value=5_000.0)
+    sleeps: list[float] = []
+    attempts: list[tuple[float, str | None]] = []
+
+    class AdvancingScheduler(RealScheduler):
+        async def sleep(self, delay: float, result=None):
+            sleeps.append(delay)
+            clock.advance(delay)
+            return result
+
+    service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(service, "_clock", clock)
+    monkeypatch.setattr(service, "_scheduler", AdvancingScheduler())
+    monkeypatch.setattr(service._load_balancer, "_clock", clock)
+    monkeypatch.setattr(proxy_module, "_stream_request_budget_seconds", lambda *_a, **_k: 32.0)
+    monkeypatch.setattr(streaming_retry_module, "_account_selection_recovery_sleep_seconds", lambda _selection: 30.0)
+    dashboard = await proxy_module.get_settings_cache().get()
+    dashboard.upstream_stream_transport = "http"
+
+    async def upstream(payload, headers, access_token, account_id, **kwargs):
+        attempts.append((clock.monotonic(), account_id))
+        if len(attempts) == 1:
+            raise proxy_client_module.ProxyResponseError(
+                429, {"error": {"code": "account_response_create_cap", "message": "Account create capacity exhausted"}}
+            )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_capacity_retry","status":"completed",'
+            '"output":[],"usage":{"input_tokens":128,"output_tokens":1,"total_tokens":129,'
+            '"input_tokens_details":{"cached_tokens":64}}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+
+    class BackpressuredWriter(_AsgiStream):
+        held = False
+
+        async def _send(self, message):
+            if (
+                message["type"] == "http.response.body"
+                and not self.held
+                and b"waiting_for_account_capacity" in message.get("body", b"")
+            ):
+                self.held = True
+                clock.advance(backpressure)
+                await asyncio.sleep(0)
+            await super()._send(message)
+
+    downstream = BackpressuredWriter(
+        app=app_instance,
+        path="/backend-api/codex/responses",
+        headers={"accept": "text/event-stream", "user-agent": "codex-cli/1.0"},
+        body=json.dumps(
+            {
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "stream": True,
+                "input": [{"type": "reasoning", "id": "rs_capacity_owner", "encrypted_content": "owner-bound"}],
+            }
+        ).encode(),
+    )
+    await asyncio.wait_for(downstream.run(), 5)
+    assert downstream.held, "actual route never delivered a capacity recovery keepalive"
+    assert sleeps == expected_sleep, "writer suspension consumed the budget needed for recovery"
+    assert attempts == [(5_000.0, raw_account_id), (5_000.0 + max(30.0, backpressure), raw_account_id)]
+    assert downstream.status == 200
+    events = list(_iter_sse_events(downstream.received().decode().splitlines()))
+    assert sum(event.get("type") == "response.completed" for event in events) == 1
+    assert not any(event.get("type") == "response.failed" for event in events)
+    await service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        records = (await session.execute(select(RequestLog))).scalars().all()
+    # Request logs record attempts, not only the final usage settlement.
+    assert len(records) == 2
+    failures = [record for record in records if record.status == "error"]
+    successes = [record for record in records if record.status == "success"]
+    assert len(failures) == len(successes) == 1
+    assert failures[0].error_code == "account_response_create_cap"
+    assert (failures[0].input_tokens, failures[0].cached_input_tokens, failures[0].output_tokens) == (None, None, None)
+    assert (successes[0].input_tokens, successes[0].cached_input_tokens, successes[0].output_tokens) == (128, 64, 1)
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -179,6 +352,62 @@ async def test_proxy_responses_no_accounts(async_client):
     assert event["response"]["status"] == "failed"
     assert event["response"]["id"] == request_id
     assert event["response"]["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("typed_cleanup_error", [False, True])
+@pytest.mark.asyncio
+async def test_responses_route_keeps_completed_terminal_after_cleanup_failure(
+    async_client, app_instance, monkeypatch, path, typed_cleanup_error
+):
+    auth_json = _make_auth_json("acc_route_cleanup", "route-cleanup@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+    upstream_calls = 0
+    closed = False
+
+    async def upstream(*_args, **_kwargs):
+        nonlocal upstream_calls, closed
+        upstream_calls += 1
+        try:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"resp_route_cleanup",'
+                '"object":"response","status":"completed","model":"gpt-5.4","output":[], '
+                '"usage":{"input_tokens":128,"output_tokens":1,"total_tokens":129,'
+                '"input_tokens_details":{"cached_tokens":64}}}}\n\n'
+            )
+        finally:
+            closed = True
+            if typed_cleanup_error:
+                raise proxy_module.ProxyResponseError(
+                    500, {"error": {"code": "upstream_error", "message": "route finalizer failed"}}
+                )
+            raise RuntimeError("route finalizer failed")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    # Observe bytes written by the actual route even when its body subsequently
+    # propagates the finalizer fault. Identity is covered at the service caller.
+    async with AsyncClient(
+        transport=ASGITransport(app=app_instance, raise_app_exceptions=False), base_url="http://testserver"
+    ) as client:
+        response = await client.post(path, json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True})
+    assert response.status_code == 200
+    terminals = [
+        event
+        for event in _iter_sse_events(response.text.splitlines())
+        if event["type"] in {"response.completed", "response.failed", "response.incomplete", "error"}
+    ]
+    assert [event["type"] for event in terminals] == ["response.completed"]
+    assert terminals[0]["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 64
+    assert closed and upstream_calls == 1
+    assert await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        logs = (await session.execute(select(RequestLog))).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "success"
+    assert (logs[0].input_tokens, logs[0].cached_input_tokens, logs[0].output_tokens) == (128, 64, 1)
 
 
 @pytest.mark.asyncio
@@ -667,7 +896,7 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and_streams_item(
+async def test_proxy_responses_compaction_trigger_preserves_required_tool_image_and_streams_item(
     async_client,
     monkeypatch,
 ):
@@ -792,8 +1021,9 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
     assert compact_input[2]["call_id"] == "call_route_image"
     compact_input_json = json.dumps(compact_input)
     assert "Image Size: 1512x982." in compact_input_json
-    assert "Omitted inline image bytes that were already observed before compaction" in compact_input_json
-    assert "data:image/png;base64" not in compact_input_json
+    assert "Omitted inline image bytes that were already observed before compaction" not in compact_input_json
+    assert compact_input == payload["input"]
+    assert "data:image/png;base64" in compact_input_json
     assert compact_input[-1] == {"type": "compaction_trigger"}
     assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 1
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
@@ -894,46 +1124,51 @@ async def test_proxy_responses_compaction_trigger_preserves_conversation(async_c
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_compaction_trigger_rejects_untrimmable_input_before_admission(
+async def test_proxy_responses_compaction_trigger_preserves_large_input_through_admission(
     async_client,
     monkeypatch,
 ):
-    async def unexpected_admission(*args, **kwargs):
-        del args, kwargs
-        pytest.fail("admission should not run for an untrimmable compaction trigger")
+    auth_json = _make_auth_json("large-trigger", "large-trigger@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+    history = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "middle context " + "y" * 500_000},
+        {"role": "user", "content": "latest request " + "x" * 500_000},
+        {"type": "compaction_trigger"},
+    ]
+    seen = []
 
-    async def unexpected_limits(*args, **kwargs):
-        del args, kwargs
-        pytest.fail("limit reservation should not run for an untrimmable compaction trigger")
+    async def compact(payload, *_args, **_kwargs):
+        seen.append(payload.to_payload()["input"])
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "opaque-large-window"}],
+            }
+        )
 
-    async def unexpected_compact(*args, **kwargs):
-        del args, kwargs
-        pytest.fail("compact should not run for an untrimmable compaction trigger")
-
-    monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", unexpected_admission)
-    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", unexpected_limits)
-    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", unexpected_compact)
-
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
     response = await async_client.post(
         "/backend-api/codex/responses",
         json={
             "model": "gpt-5.1",
             "instructions": "compact this turn",
-            "input": [
-                {"role": "user", "content": "initial instructions"},
-                {"role": "assistant", "content": "middle context " + "y" * 500_000},
-                {"role": "user", "content": "latest request " + "x" * 500_000},
-                {"type": "compaction_trigger"},
-            ],
+            "input": history,
             "stream": True,
         },
     )
-
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["type"] == "invalid_request_error"
-    assert error["code"] == "responses_compact_input_too_large"
-    assert error["param"] == "input"
+    assert response.status_code == 200
+    expected = [
+        history[0],
+        {"role": "assistant", "content": [{"type": "output_text", "text": "middle context " + "y" * 500_000}]},
+        history[2],
+        history[3],
+    ]
+    assert seen == [expected]
+    assert "response.completed" in response.text
 
 
 @pytest.mark.asyncio
@@ -4322,3 +4557,306 @@ async def test_v1_responses_disconnect_stamp_reaches_traced_response_through_rea
         "request_id=req_delivery_trace_stamp surface=responses outcome=terminal_after_disconnect "
         "terminal=response.completed"
     ) in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("kind", ["completed", "missing", "malformed"])
+async def test_responses_preserve_buffered_http_terminal_and_usage(async_client, monkeypatch, path, kind):
+    import app.core.clients.codex as codex_client_module
+    from tests.integration.test_proxy_http_payload_framing import _early_close_upstream
+
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_buffered", "buffered@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    dashboard = await proxy_module.get_settings_cache().get()
+    dashboard.upstream_stream_transport = "http"
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: None)
+    monkeypatch.setattr(codex_client_module, "discover_native_egress_client", lambda: None)
+    monkeypatch.setattr(proxy_client_module, "resolve_http_proxy_from_env", lambda _url: None)
+    async with _early_close_upstream(kind, 32768, False) as upstream:
+        settings = Settings(upstream_base_url=upstream, stream_idle_timeout_seconds=2.0)
+        monkeypatch.setattr(proxy_client_module, "get_settings", lambda: settings)
+        async with async_client.stream(
+            "POST",
+            path,
+            json={"model": "gpt-5.4", "instructions": "synthetic framing probe", "input": [], "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            events = list(_iter_sse_events([line async for line in response.aiter_lines()]))
+    completed = [event for event in events if event.get("type") == "response.completed"]
+    if kind == "completed":
+        assert len(completed) == 1
+        assert not any(event.get("type") == "response.failed" for event in events)
+        assert completed[0]["response"]["output"][0]["content"][0]["text"] == "x" * 32768
+        async with SessionLocal() as session:
+            records = (await session.execute(select(RequestLog))).scalars().all()
+        assert len(records) == 1
+        assert records[0].status == "success"
+        assert records[0].input_tokens == 128
+        assert records[0].cached_input_tokens == 64
+        assert records[0].output_tokens == 1
+    else:
+        assert not completed
+        async with SessionLocal() as session:
+            records = (await session.execute(select(RequestLog))).scalars().all()
+        assert records and all(record.status == "error" for record in records)
+        expected_error = "invalid_upstream_response" if kind == "malformed" else "upstream_unavailable"
+        assert any(record.error_code == expected_error for record in records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("use_native", [False, True], ids=["python", "native"])
+@pytest.mark.parametrize("valid_terminal", [False, True], ids=["invalid", "valid"])
+async def test_mislabeled_terminal_settles_payload_validity_on_disconnect(
+    async_client, app_instance, monkeypatch, path, use_native, valid_terminal
+):
+    import app.core.clients.codex as codex_client_module
+    from app.core.clients.native_egress import SubprocessNativeEgressClient
+    from tests.integration.model_source_helpers import _AsgiStream
+    from tests.integration.test_proxy_http_payload_framing import _early_close_upstream
+
+    helper = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY") if use_native else None
+    if use_native and (not helper or not Path(helper).is_file() or not os.access(helper, os.X_OK)):
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY for native route qualification")
+    native_client = SubprocessNativeEgressClient(Path(helper)) if helper else None
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_mislabeled", "mislabeled@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    dashboard = await proxy_module.get_settings_cache().get()
+    dashboard.upstream_stream_transport = "http"
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(codex_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_client_module, "resolve_http_proxy_from_env", lambda _url: None)
+
+    class DisconnectAtTerminal(_AsgiStream):
+        disconnect_delivered = False
+        terminal_send_cancelled = False
+
+        async def _receive(self):
+            message = await super()._receive()
+            if message["type"] == "http.disconnect":
+                self.disconnect_delivered = True
+            return message
+
+        async def _send(self, message):
+            await super()._send(message)
+            if message["type"] == "http.response.body":
+                events = list(_iter_sse_events(self.received().decode().splitlines()))
+                if any(event.get("type") in {"response.completed", "response.failed"} for event in events):
+                    self.disconnect()
+                    # Keep the writer pending until the real ASGI disconnect
+                    # cancels this send; queuing a notice is not departure proof.
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        self.terminal_send_cancelled = True
+                        raise
+
+    downstream = DisconnectAtTerminal(
+        app=app_instance,
+        path=path,
+        headers={},
+        body=json.dumps(
+            {"model": "gpt-5.4", "instructions": "synthetic framing probe", "input": [], "stream": True}
+        ).encode(),
+    )
+    try:
+        kind = "mislabeled_valid" if valid_terminal else "mislabeled"
+        async with _early_close_upstream(kind, 32768, False) as upstream:
+            settings = Settings(upstream_base_url=upstream, stream_idle_timeout_seconds=2.0)
+            monkeypatch.setattr(proxy_client_module, "get_settings", lambda: settings)
+            await asyncio.wait_for(downstream.run(), 5)
+        if native_client is not None:
+            assert native_client._generation > 0, "public route did not dispatch to the actual helper"
+    finally:
+        if native_client is not None:
+            await native_client.aclose()
+    assert downstream.disconnect_delivered
+    assert downstream.terminal_send_cancelled
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        records = (await session.execute(select(RequestLog))).scalars().all()
+    if valid_terminal:
+        assert len(records) == 1 and records[0].status == "success"
+        assert (records[0].input_tokens, records[0].cached_input_tokens, records[0].output_tokens) == (128, 64, 1)
+        completed = [
+            event
+            for event in _iter_sse_events(downstream.received().decode().splitlines())
+            if event.get("type") == "response.completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0]["response"]["output"][0]["content"][0]["text"] == "x" * 32768
+        return
+    assert records and all(record.status == "error" for record in records)
+    assert any(record.error_code == "invalid_upstream_response" for record in records)
+    assert not any(
+        event.get("type") == "response.completed"
+        for event in _iter_sse_events(downstream.received().decode().splitlines())
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("use_native", [False, True], ids=["python", "native"])
+async def test_response_start_disconnect_closes_pending_upstream(
+    async_client, app_instance, monkeypatch, path, use_native
+):
+    import app.core.clients.codex as codex_client_module
+    from app.core.clients.native_egress import SubprocessNativeEgressClient
+    from tests.integration.model_source_helpers import _AsgiStream
+    from tests.integration.test_proxy_http_payload_framing import _early_close_upstream
+
+    helper = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY") if use_native else None
+    if use_native and (not helper or not Path(helper).is_file() or not os.access(helper, os.X_OK)):
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY for native route qualification")
+    native_client = SubprocessNativeEgressClient(Path(helper)) if helper else None
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_pending", "pending@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    dashboard = await proxy_module.get_settings_cache().get()
+    dashboard.upstream_stream_transport = "http"
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(codex_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_client_module, "resolve_http_proxy_from_env", lambda _url: None)
+    monkeypatch.setattr(proxy_api_module, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.05)
+
+    class DisconnectAtStart(_AsgiStream):
+        disconnect_delivered = False
+        start_send_cancelled = False
+
+        async def _receive(self):
+            message = await super()._receive()
+            if message["type"] == "http.disconnect":
+                self.disconnect_delivered = True
+            return message
+
+        async def _send(self, message):
+            await super()._send(message)
+            if message["type"] == "http.response.start":
+                self.disconnect()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.start_send_cancelled = True
+                    raise
+
+    downstream = DisconnectAtStart(
+        app=app_instance,
+        path=path,
+        headers={},
+        body=json.dumps(
+            {"model": "gpt-5.4", "instructions": "synthetic startup probe", "input": [], "stream": True}
+        ).encode(),
+    )
+    upstream_disconnected = asyncio.Event()
+    try:
+        async with _early_close_upstream("pending", 0, False, disconnected=upstream_disconnected) as upstream:
+            settings = Settings(upstream_base_url=upstream, stream_idle_timeout_seconds=10)
+            monkeypatch.setattr(proxy_client_module, "get_settings", lambda: settings)
+            await asyncio.wait_for(downstream.run(), 5)
+            assert downstream.disconnect_delivered and downstream.start_send_cancelled
+            assert not downstream.received(), "body iteration unexpectedly began"
+            # Observe real peer EOF before fixture teardown or helper shutdown;
+            # neither may manufacture the upstream resource release proof.
+            await asyncio.wait_for(upstream_disconnected.wait(), 1)
+            if native_client is not None:
+                assert native_client._generation > 0
+            await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    finally:
+        if native_client is not None:
+            await native_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("use_native", [False, True], ids=["python", "native"])
+async def test_completed_response_disconnect_releases_real_upstream(
+    async_client, app_instance, monkeypatch, path, use_native
+):
+    import app.core.clients.codex as codex_client_module
+    from app.core.clients.native_egress import SubprocessNativeEgressClient
+    from tests.integration.model_source_helpers import _AsgiStream
+    from tests.integration.test_proxy_http_payload_framing import _early_close_upstream
+
+    helper = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY") if use_native else None
+    if use_native and (not helper or not Path(helper).is_file() or not os.access(helper, os.X_OK)):
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY for native route qualification")
+    native_client = SubprocessNativeEgressClient(Path(helper)) if helper else None
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": ("auth.json", json.dumps(_make_auth_json("acc_held", "held@example.com")), "application/json")
+        },
+    )
+    assert imported.status_code == 200
+    dashboard = await proxy_module.get_settings_cache().get()
+    dashboard.upstream_stream_transport = "http"
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(codex_client_module, "discover_native_egress_client", lambda: native_client)
+    monkeypatch.setattr(proxy_client_module, "resolve_http_proxy_from_env", lambda _url: None)
+
+    class DisconnectAtTerminal(_AsgiStream):
+        terminal_send_cancelled = False
+
+        async def _send(self, message):
+            await super()._send(message)
+            if message["type"] == "http.response.body" and b'"response.completed"' in message.get("body", b""):
+                self.disconnect()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.terminal_send_cancelled = True
+                    raise
+
+    downstream = DisconnectAtTerminal(
+        app=app_instance,
+        path=path,
+        headers={},
+        body=json.dumps(
+            {"model": "gpt-5.4", "instructions": "synthetic terminal cleanup", "input": [], "stream": True}
+        ).encode(),
+    )
+    upstream_disconnected = asyncio.Event()
+    try:
+        async with _early_close_upstream(
+            "held_completed", 32768, False, disconnected=upstream_disconnected
+        ) as upstream:
+            settings = Settings(upstream_base_url=upstream, stream_idle_timeout_seconds=10)
+            monkeypatch.setattr(proxy_client_module, "get_settings", lambda: settings)
+            await asyncio.wait_for(downstream.run(), 5)
+            assert downstream.terminal_send_cancelled
+            assert b'"response.completed"' in downstream.received()
+            # Teardown and helper shutdown must not create the resource-release proof.
+            await asyncio.wait_for(upstream_disconnected.wait(), 1)
+            if native_client is not None:
+                assert native_client._generation > 0
+            await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    finally:
+        if native_client is not None:
+            await native_client.aclose()

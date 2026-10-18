@@ -35,14 +35,16 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_and_releases_reservation(
+@pytest.mark.parametrize("release_fails", [False, True], ids=["fallback_released", "both_writes_fail"])
+async def test_proxy_compact_forwarded_bridge_settlement_failure_preserves_owner_contract(
     async_client,
     monkeypatch,
+    release_fails: bool,
 ):
     """A forwarded owner must not report compact success when its sole API-key
     usage settlement fails. After cleanup-ready, the receiver keeps HTTP 200
     and surfaces `usage_settlement_failed` on the SSE body so origin cannot
-    replay. A fresh repository still releases the held quota."""
+    replay. A successful fallback releases quota; failed fallback truthfully retains it."""
     from app.core.config.settings import get_settings
     from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
     from app.db.models import ApiKeyUsageReservation
@@ -152,7 +154,17 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         finalize_attempts.append(reservation_id)
         raise RuntimeError("compact settlement persistence failed")
 
+    release_attempts: list[str] = []
+    original_release = ApiKeysService.release_usage_reservation
+
+    async def release_or_fail(self, reservation_id: str) -> None:
+        release_attempts.append(reservation_id)
+        if release_fails:
+            raise OSError("compact fallback release persistence failed")
+        await original_release(self, reservation_id)
+
     handle_stream_error = AsyncMock(return_value={"failure_class": "upstream"})
+    monkeypatch.setattr(ApiKeysService, "release_usage_reservation", release_or_fail)
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
     monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fail_finalize)
     monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", handle_stream_error)
@@ -169,12 +181,13 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
     assert "usage_settlement_failed" in response.text
     assert compact_calls == [raw_account_id]
     assert finalize_attempts == [reservation.reservation_id]
+    assert release_attempts == [reservation.reservation_id]
     handle_stream_error.assert_not_awaited()
 
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
-        assert row.status == "released"
+        assert row.status == ("reserved" if release_fails else "released")
 
 
 class _JsonResponse:
@@ -204,8 +217,7 @@ class _SseContent:
         del size
         yield (
             b'data: {"type":"response.output_item.done","output_index":0,'
-            b'"item":{"id":"msg_compact_summary_1","type":"message","role":"assistant",'
-            b'"status":"completed","content":[{"type":"output_text","text":"enc_compact_summary_1"}]}}\n\n'
+            b'"item":{"type":"compaction","status":"completed","encrypted_content":"enc_compact_summary_1"}}\n\n'
             b'data: {"type":"response.completed","response":'
             b'{"object":"response","id":"resp_compact_summary_1","status":"completed","output":[]}}\n\n'
         )
@@ -282,7 +294,19 @@ async def test_proxy_compact_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_rejects_untrimmable_lite_prelude_before_account_selection(async_client):
+async def test_proxy_compact_preserves_large_lite_prelude_before_upstream(async_client, monkeypatch):
+    auth = _make_auth_json("compact-large-prelude", "compact-large-prelude@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    )
+    assert imported.status_code == 200
+    seen = []
+
+    async def compact(payload, headers, access_token, account_id):
+        seen.append(payload.to_payload())
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -308,14 +332,13 @@ async def test_proxy_compact_rejects_untrimmable_lite_prelude_before_account_sel
 
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["code"] == "responses_compact_input_too_large"
-    assert error["param"] == "input"
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert seen[0]["input"] == ResponsesCompactRequest.model_validate(payload).input
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, monkeypatch):
+async def test_proxy_compact_preserves_native_tool_fields_before_upstream(async_client, monkeypatch):
     email = "compact-tools@example.com"
     raw_account_id = "acc_compact_tools"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -348,9 +371,9 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
     assert seen_payloads[0]["model"] == "gpt-5.1"
     assert seen_payloads[0]["instructions"] == "hi"
     assert seen_payloads[0]["input"] == []
-    assert "tools" not in seen_payloads[0]
-    assert "tool_choice" not in seen_payloads[0]
-    assert seen_payloads[0]["parallel_tool_calls"] is False
+    assert seen_payloads[0]["tools"] == payload["tools"]
+    assert seen_payloads[0]["tool_choice"] == payload["tool_choice"]
+    assert seen_payloads[0]["parallel_tool_calls"] is True
     assert "text" not in seen_payloads[0]
 
 
@@ -405,18 +428,11 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
     assert isinstance(upstream_input, list)
     assert side_effect_call in upstream_input
     assert side_effect_output in upstream_input
-    assert all(
-        not (
-            isinstance(item, dict)
-            and item.get("role") == "assistant"
-            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
-        )
-        for item in upstream_input
-    )
+    assert upstream_input == ResponsesCompactRequest.model_validate(payload).input
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
+async def test_proxy_compact_preserves_large_tool_tail_before_upstream(async_client, monkeypatch):
     email = "compact-optional-tail@example.com"
     raw_account_id = "acc_compact_optional_tail"
     response = await async_client.post(
@@ -456,9 +472,9 @@ async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(
     assert response.status_code == 200
     assert len(seen_payloads) == 1
     compact_input = cast(list[object], seen_payloads[0]["input"])
-    assert call not in compact_input
-    assert output not in compact_input
-    assert "[compact trim]" in json.dumps(compact_input)
+    assert call in compact_input
+    assert output in compact_input
+    assert "[compact trim]" not in json.dumps(compact_input)
     assert "most recent context" not in json.dumps(compact_input)
 
 
@@ -552,7 +568,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(async_client, monkeypatch):
+async def test_proxy_compact_preserves_file_owner_from_full_history(async_client, monkeypatch):
     for raw_account_id, email in (
         ("acc_compact_trim_file_owner", "compact-trim-file-owner@example.com"),
         ("acc_compact_trim_selected", "compact-trim-selected@example.com"),
@@ -570,9 +586,6 @@ async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(asyn
     async with SessionLocal() as session:
         accounts = (await session.execute(select(Account).order_by(Account.id))).scalars().all()
     file_owner = next(account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_file_owner")
-    selected_account = next(
-        account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_selected"
-    )
     await service._pin_file_account("file_compact_trimmed_optional", file_owner.id)
 
     seen: dict[str, object] = {}
@@ -580,7 +593,7 @@ async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(asyn
     async def fake_select_account(self, deadline, **kwargs):
         del self, deadline
         seen["preferred_account_id"] = kwargs.get("preferred_account_id")
-        return proxy_module.AccountSelection(account=selected_account, error_message=None)
+        return proxy_module.AccountSelection(account=file_owner, error_message=None)
 
     async def fake_compact(payload, headers, access_token, account_id):
         del headers, access_token
@@ -611,10 +624,10 @@ async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(asyn
     )
 
     assert response.status_code == 200
-    assert seen["preferred_account_id"] is None
-    assert seen["upstream_account_id"] == "acc_compact_trim_selected"
+    assert seen["preferred_account_id"] == file_owner.id
+    assert seen["upstream_account_id"] == "acc_compact_trim_file_owner"
     upstream_payload = cast(ResponsesCompactRequest, seen["upstream_payload"]).to_payload()
-    assert "file_compact_trimmed_optional" not in json.dumps(upstream_payload)
+    assert "file_compact_trimmed_optional" in json.dumps(upstream_payload)
 
 
 @pytest.mark.asyncio
@@ -763,10 +776,12 @@ async def test_proxy_compact_normalizes_summary_output_for_codex_remote_v2(async
     assert compact_json["object"] == "response.compaction"
     assert compact_json["output"] == [
         {
-            "id": "cmp_compact_v2",
-            "type": "compaction",
-            "encrypted_content": "enc_compact_v2",
-        }
+            "id": "msg_compact_v2",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "historical user text"}],
+        },
+        {"id": "cmp_compact_v2", "type": "compaction", "encrypted_content": "enc_compact_v2"},
     ]
 
 
@@ -1947,7 +1962,10 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     }
     expected_compact_window = {
         **compact_window,
-        "output": [{"type": "compaction", "encrypted_content": "preserve me exactly"}],
+        "output": [
+            {"type": "compaction", "encrypted_content": "preserve me exactly"},
+            {"type": "reasoning", "encrypted_content": "enc_round_trip_state"},
+        ],
     }
     seen_inputs: list[object] = []
 

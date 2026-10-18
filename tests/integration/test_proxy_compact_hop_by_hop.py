@@ -17,8 +17,7 @@ class _SseContent:
         del size
         yield (
             b'data: {"type":"response.output_item.done","output_index":0,'
-            b'"item":{"id":"msg_compact_summary_hop","type":"message","role":"assistant",'
-            b'"status":"completed","content":[{"type":"output_text","text":"enc_compact_summary_hop"}]}}\n\n'
+            b'"item":{"type":"compaction","encrypted_content":"enc_compact_summary_hop"}}\n\n'
             b'data: {"type":"response.completed","response":'
             b'{"object":"response","id":"resp_compact_summary_hop","status":"completed","output":[]}}\n\n'
         )

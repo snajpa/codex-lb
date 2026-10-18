@@ -229,3 +229,43 @@ async def test_http_retry_model_unsupported_owner_rejection_still_rebinds_prompt
     assert harness.sticky_repo.account_ids_by_key is not None
     assert harness.sticky_repo.account_ids_by_key[harness.thread_key] == harness.alternate.id
     assert await harness.service.drain_persistence_tasks(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [True, False])
+async def test_http_stream_prefers_response_create_capacity_before_soft_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sticky: bool,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=proxy_service.__name__)
+    harness = _Harness("http-paired-cap")
+    _install(monkeypatch, harness, AssertionError("full-create account reached upstream"))
+    if not sticky:
+        harness.headers = {"user-agent": "codex/1.2"}
+    async with harness.service._repo_factory() as repos:
+        for window in ("primary", "secondary"):
+            rows = await repos.usage.latest_by_account(window)
+            rows[harness.owner.id].used_percent = 0.0
+            rows[harness.alternate.id].used_percent = 50.0
+    leases = []
+    try:
+        for kind in ("stream", "response_create"):
+            for _ in range(4):
+                lease = await harness.service._load_balancer.acquire_account_lease(harness.owner.id, kind=kind)
+                assert lease is not None
+                leases.append(lease)
+        event = await _stream_turn(harness)
+        assert "Responses account response-create cap reached" not in caplog.text
+        assert event["type"] == "response.completed"
+        assert harness.upstream_account_ids == [harness.alternate.chatgpt_account_id]
+        if sticky:
+            assert harness.sticky_repo.account_ids_by_key[harness.thread_key] == harness.owner.id
+            assert harness.sticky_repo.deleted == []
+    finally:
+        for lease in leases:
+            await harness.service._load_balancer.release_account_lease(lease)
+        assert await harness.service.drain_persistence_tasks(timeout_seconds=1)
+    for runtime in harness.service._load_balancer._runtime.values():
+        assert runtime.inflight_streams == 0
+        assert runtime.inflight_response_creates == 0

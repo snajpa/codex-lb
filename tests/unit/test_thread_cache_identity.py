@@ -780,18 +780,7 @@ def _compact_request() -> ResponsesCompactRequest:
     )
 
 
-@pytest.fixture
-def compact_budget_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    seen: list[dict[str, Any]] = []
-
-    def spy(payload_dict: dict[str, Any]) -> None:
-        seen.append(copy.deepcopy(payload_dict))
-
-    monkeypatch.setattr(proxy_module, "validate_compact_input_wire_budget", spy)
-    return seen
-
-
-async def _drive_compact(identity: ThreadCacheIdentity | None) -> None:
+async def _drive_compact(identity: ThreadCacheIdentity | None) -> dict[str, Any]:
     session = AsyncMock()
     # The payload and headers are fully built before the POST; failing there
     # keeps the test on the real build path without a live upstream.
@@ -806,22 +795,20 @@ async def _drive_compact(identity: ThreadCacheIdentity | None) -> None:
             thread_cache_identity=identity,
         )
 
-
-@pytest.mark.asyncio
-async def test_compact_shared_mode_payload_is_identical(compact_budget_spy: list[dict[str, Any]]) -> None:
-    await _drive_compact(None)
-    await _drive_compact(_shared())
-
-    assert len(compact_budget_spy) == 2
-    assert compact_budget_spy[1] == compact_budget_spy[0]
+    assert session.post.call_count == 1
+    return copy.deepcopy(session.post.call_args.kwargs["json"])
 
 
 @pytest.mark.asyncio
-async def test_compact_wire_budget_sees_the_injected_prefix(compact_budget_spy: list[dict[str, Any]]) -> None:
-    """The budget check must run against the size actually sent."""
-    await _drive_compact(_isolated())
+async def test_compact_shared_mode_payload_is_identical() -> None:
+    baseline = await _drive_compact(None)
+    shared = await _drive_compact(_shared())
+    assert shared == baseline
 
-    validated = compact_budget_spy[0]
+
+@pytest.mark.asyncio
+async def test_compact_wire_contains_the_injected_prefix() -> None:
+    validated = await _drive_compact(_isolated())
     assert validated["input"][0]["content"][0]["text"] == _isolated().scope_line
     assert validated["prompt_cache_key"] == f"compact-key-1-{_isolated().token}"
 

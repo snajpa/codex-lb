@@ -19,6 +19,95 @@ from app.modules.usage.repository import UsageRepository
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["overview", "projections"])
+async def test_dashboard_percentage_burn_survives_unknown_promax_allowance(
+    async_client, db_setup, monkeypatch, endpoint
+):
+    from app.core import usage as usage_core
+
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_PRIMARY, "promax")
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_SECONDARY, "promax")
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    reset = int(naive_utc_to_epoch(now + timedelta(days=6)))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("max-burn", "max-burn@example.com", "promax"))
+        usage = UsageRepository(session)
+        for minutes, used in [(61, 10.0), (1, 20.0)]:
+            await usage.add_entry(
+                "max-burn",
+                used,
+                window="primary",
+                window_minutes=10080,
+                reset_at=reset,
+                recorded_at=now - timedelta(minutes=minutes),
+            )
+    response = await async_client.get(f"/api/dashboard/{endpoint}")
+    assert response.status_code == 200
+    payload = response.json()
+    estimates = payload.get("quotaBurn", [])
+    assert len(estimates) == 1
+    assert estimates[0]["ratePercentPerHour"] == pytest.approx(10.0)
+    assert estimates[0]["remainingPercent"] == pytest.approx(80.0)
+    assert estimates[0]["observationMinutes"] == pytest.approx(60.0)
+    assert estimates[0]["projectedExhaustionAt"] is not None
+    assert payload["weeklyCreditPace"] is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_recent_spend_is_not_the_seven_day_average(async_client, db_setup, monkeypatch):
+    from app.core.usage.pricing import ModelPrice
+
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    monkeypatch.setattr(
+        "app.core.usage.pricing_catalog.get_active_prices",
+        lambda: {
+            "synthetic-spend": ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.1, output_per_1m=10.0),
+        },
+    )
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("spend-account", "spend@example.com"))
+        session.add(
+            RequestLog(
+                account_id="spend-account",
+                request_id="history-start",
+                model="synthetic-spend",
+                requested_at=now - timedelta(hours=18),
+                status="success",
+                cost_usd=0.0,
+            )
+        )
+        for index in range(10):
+            session.add(
+                RequestLog(
+                    account_id="spend-account",
+                    request_id=f"spend-{index}",
+                    model="synthetic-spend",
+                    requested_at=now - timedelta(minutes=30),
+                    status="success",
+                    input_tokens=100_000,
+                    cached_input_tokens=90_000,
+                    output_tokens=0,
+                    cost_usd=0.1,
+                    service_tier="default",
+                    requested_service_tier="priority",
+                    actual_service_tier="default",
+                )
+            )
+        await session.commit()
+    response = await async_client.get("/api/dashboard/overview?timeframe=7d")
+    assert response.status_code == 200
+    projection = response.json().get("apiSpendProjection")
+    assert isinstance(projection, dict)
+    assert projection["observedMinutes"] == 60
+    assert projection["projected24hUsd"] == pytest.approx(24.0)
+    assert projection["projectedUncached24hUsd"] == pytest.approx(48.0)
+    assert projection["cachedInputPercent"] == pytest.approx(90.0)
+    assert projection["requestedPriorityDeliveredDefault"] == 10
+
+
 def _make_account(
     account_id: str,
     email: str,
@@ -240,6 +329,50 @@ async def test_dashboard_overview_omits_weekly_pace_value_without_weekly_data(
     response = await async_client.get("/api/dashboard/overview")
 
     assert response.status_code == 200
+    assert response.json()["weeklyCreditPace"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/dashboard/overview", "/api/dashboard/projections"])
+@pytest.mark.parametrize(
+    "max_window,max_window_minutes",
+    [("primary", 10080), ("secondary", 10080), ("secondary", None), ("secondary", 0)],
+)
+async def test_dashboard_omits_fleet_pace_with_reported_max_secondary_usage(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    max_window: str,
+    max_window_minutes: int | None,
+):
+    from app.core import usage as usage_core
+
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_PRIMARY, "promax")
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_SECONDARY, "promax")
+    now = datetime(2026, 8, 17, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=1)))
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("pro-pace", "pro-pace@example.com", plan_type="pro"))
+        await accounts_repo.upsert(_make_account("max-pace", "max-pace@example.com", plan_type="promax"))
+        for account_id, used in (("pro-pace", 40.0), ("max-pace", 20.0)):
+            await usage_repo.add_entry(
+                account_id,
+                used,
+                window=max_window if account_id == "max-pace" else "secondary",
+                window_minutes=max_window_minutes if account_id == "max-pace" else 10080,
+                reset_at=reset_at,
+                recorded_at=now - timedelta(minutes=1),
+            )
+
+    response = await async_client.get(endpoint)
+
+    assert response.status_code == 200
+    if endpoint == "/api/dashboard/overview":
+        assert response.json()["summary"]["secondaryWindow"]["unquantifiedAccountCount"] == 1
     assert response.json()["weeklyCreditPace"] is None
 
 
@@ -1540,3 +1673,37 @@ async def test_dashboard_overview_exposes_zero_previous_window_totals_when_full_
             "costUsd": 0.0,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/dashboard/overview", "/api/dashboard/projections"])
+async def test_calibrated_promax_restores_upstream_credit_runway(async_client, db_setup, monkeypatch, endpoint):
+    now = datetime(2026, 8, 17, 12)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=1)))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("max-calibrated", "max@example.test", "promax"))
+        usage = UsageRepository(session)
+        for minutes, percent in [(61, 10.0), (1, 20.0)]:
+            await usage.add_entry(
+                "max-calibrated",
+                percent,
+                window="primary",
+                window_minutes=10080,
+                reset_at=reset_at,
+                recorded_at=now - timedelta(minutes=minutes),
+            )
+    response = await async_client.get(endpoint)
+    assert response.status_code == 200
+    payload = response.json()
+    if endpoint.endswith("overview"):
+        weekly = payload["summary"]["secondaryWindow"]
+        assert weekly["capacityCredits"] == 189000.0
+        assert weekly["remainingCredits"] == 151200.0
+        assert weekly["unquantifiedAccountCount"] == 0
+        assert payload["accounts"][0]["capacityCreditsSecondary"] == 189000.0
+    pace = payload["weeklyCreditPace"]
+    assert pace is not None
+    assert pace["totalActualRemainingCredits"] == pytest.approx(151200.0)
+    assert pace["burnRateRecentCreditsPerHour"] > 0
+    assert pace["depletionEtaHours"] is not None

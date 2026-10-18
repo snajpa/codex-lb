@@ -14,6 +14,19 @@ afterEach(() => {
 });
 
 describe("AccountList", () => {
+  it("keeps every account in document flow without an inner height cap", () => {
+    const accounts = Array.from({ length: 12 }, (_, index) => createAccountSummary({
+      accountId: `visible-${index}`,
+      displayName: `Visible ${index} Account`,
+    }));
+    render(<AccountList accounts={accounts} />);
+    expect(screen.getAllByTestId("account-list-row")).toHaveLength(12);
+    const body = screen.getByTestId("dashboard-account-list").firstElementChild as HTMLElement;
+    expect(body.style.maxHeight).toBe("");
+    expect(body.style.height).toBe("");
+    expect(body).not.toHaveClass("overflow-y-auto");
+  });
+
   function rowNames() {
     return screen.getAllByTestId("account-list-row").map((row) => {
       const paragraph = within(row).getAllByText(/Account$/)[0];

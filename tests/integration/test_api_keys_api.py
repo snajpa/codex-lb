@@ -10,6 +10,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
 
+import aiohttp
 import pytest
 from fastapi.responses import JSONResponse
 from sqlalchemy import exc as sqlalchemy_exc
@@ -406,6 +407,41 @@ async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigne
 
 
 @pytest.mark.asyncio
+async def test_api_key_list_reports_scoped_weekly_max_unknown_capacity(async_client, monkeypatch):
+    from app.core import usage as usage_core
+
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_PRIMARY, "promax")
+    monkeypatch.delitem(usage_core.PLAN_CAPACITY_CREDITS_SECONDARY, "promax")
+    max_id = await _import_account(async_client, "max-pool", "max-pool@example.com")
+    plus_id = await _import_account(async_client, "plus-pool", "plus-pool@example.com")
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == max_id).values(plan_type="promax"))
+        session.add(
+            UsageHistory(
+                account_id=max_id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=int((utcnow() + timedelta(days=6)).timestamp()),
+                window_minutes=10080,
+            )
+        )
+        await session.commit()
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "max-pool-key", "assignedAccountIds": [max_id, plus_id]},
+    )
+    assert created.status_code == 200
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    [row] = listed.json()
+    assert row["unquantifiedAccountCountPrimary"] == 0
+    assert row["unquantifiedAccountCountSecondary"] == 1
+    assert row["pooledRemainingPercentSecondary"] is None
+    assert row["pooledCapacityCreditsPrimary"] == 225.0
+
+
+@pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
     monkeypatch.setattr(
@@ -458,6 +494,8 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
     assert usage.json()["account_pool_usage"] == {
         "primary": None,
         "secondary": None,
+        "unquantified_account_count_primary": 0,
+        "unquantified_account_count_secondary": 0,
     }
 
     called = False
@@ -3420,7 +3458,7 @@ async def test_api_key_reservation_released_on_compact_upstream_failure(async_cl
 
 
 @pytest.mark.asyncio
-async def test_api_key_reservation_released_when_compact_image_inlining_exceeds_wire_budget(
+async def test_api_key_compact_preserves_large_inline_image_and_settles_known_usage(
     async_client,
     monkeypatch,
 ):
@@ -3453,16 +3491,45 @@ async def test_api_key_reservation_released_when_compact_image_inlining_exceeds_
         del payload_dict, session, connect_timeout
         return {
             "model": _TEST_MODELS[0],
-            "input": [{"role": "user", "content": "data:image/png;base64," + "A" * 500_000}],
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "data:image/png;base64," + "A" * 500_000}],
+                }
+            ],
             "parallel_tool_calls": False,
         }
 
-    def unexpected_upstream_start(**kwargs):
-        del kwargs
-        pytest.fail("oversized transformed compact input must not reach upstream")
+    wire_payloads = []
+
+    class ProviderResponse:
+        status = 200
+        reason = "OK"
+        headers = {"content-type": "application/json"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *, content_type=None):
+            return {
+                "object": "response.compaction",
+                "model": _TEST_MODELS[0],
+                "output": [{"type": "compaction", "encrypted_content": "opaque-inline-capsule"}],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+
+    def provider_post(self, url, **kwargs):
+        del self, url
+        wire_payloads.append(kwargs["json"])
+        return ProviderResponse()
 
     monkeypatch.setattr(core_proxy_module, "_inline_input_image_urls", fake_inline)
-    monkeypatch.setattr(core_proxy_module, "_maybe_log_upstream_request_start", unexpected_upstream_start)
+    monkeypatch.setattr(core_proxy_module, "discover_native_egress_client", lambda: None)
+    monkeypatch.setattr(core_proxy_module, "resolve_http_proxy_from_env", lambda _url: None)
+    monkeypatch.setattr(aiohttp.ClientSession, "post", provider_post)
 
     response = await async_client.post(
         "/v1/responses/compact",
@@ -3479,13 +3546,22 @@ async def test_api_key_reservation_released_when_compact_image_inlining_exceeds_
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "responses_compact_input_too_large"
-    assert response.json()["error"]["param"] == "input"
+    assert response.status_code == 200
+    assert len(wire_payloads) == 1
+    assert wire_payloads[0]["input"] == [
+        {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64," + "A" * 500_000}]},
+    ]
     async with SessionLocal() as session:
         limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
         assert len(limits) == 1
-        assert limits[0].current_value == 0
+        assert limits[0].current_value == 10
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == 1
+        assert reservations[0].status == "finalized"
 
 
 @pytest.mark.asyncio

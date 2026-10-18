@@ -821,6 +821,53 @@ describe("buildDashboardView", () => {
     expect(view.weeklyCreditPace).toBe(overviewPace);
   });
 
+  it.each(["overview", "projections", "local"] as const)(
+    "suppresses the %s pace before fallback when weekly coverage is incomplete",
+    (source) => {
+      const overview = createDashboardOverview({
+        accounts: [account({
+          accountId: "known",
+          email: "known@example.com",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 25_200,
+          resetAtSecondary: "2026-10-04T00:00:00Z",
+          windowMinutesSecondary: 10_080,
+        })],
+        weeklyCreditPace: source === "overview" ? serverWeeklyPace() : null,
+      });
+      if (!overview.summary.secondaryWindow) throw new Error("Missing weekly fixture");
+      overview.summary.secondaryWindow.unquantifiedAccountCount = 1;
+      expect(buildWeeklyCreditPace(overview.accounts, new Date("2026-09-30T00:00:00Z"))).not.toBeNull();
+
+      const view = buildDashboardView(overview, [], false, {
+        weeklyCreditPace: source === "projections" ? serverWeeklyPace() : null,
+        depletionSecondary: overview.depletionSecondary,
+      });
+
+      expect(view.weeklyCreditPace).toBeNull();
+      expect(view.stats.some((stat) => stat.label.includes("Account burn"))).toBe(false);
+      expect(view.safeLineSecondary).toBeNull();
+      expect(view.safeLinePrimary).not.toBeNull();
+    },
+  );
+
+  it("excludes unquantified credit contributions without dropping observed account percentages", () => {
+    const overview = createDashboardOverview();
+    if (!overview.windows.secondary) throw new Error("Missing weekly fixture");
+    const excluded = overview.windows.secondary.accounts[0];
+    excluded.capacityKnown = false;
+    excluded.remainingCredits = 999_999;
+    const percentages = overview.accounts.map((entry) => entry.usage?.secondaryRemainingPercent);
+
+    const view = buildDashboardView(overview, []);
+
+    expect(view.secondaryUsageItems.some((entry) => entry.accountId === excluded.accountId)).toBe(false);
+    expect(view.secondaryTotal).toBe(
+      overview.windows.secondary.accounts.slice(1).reduce((sum, entry) => sum + entry.remainingCredits, 0),
+    );
+    expect(overview.accounts.map((entry) => entry.usage?.secondaryRemainingPercent)).toEqual(percentages);
+  });
+
   it("prefers the fresh overview weekly pace over a retained projections copy", () => {
     // TanStack Query keeps the last successful projections payload across
     // later failures; a stale "safe" copy must not mask a fresh "runs_dry".
@@ -1167,7 +1214,7 @@ describe("buildDashboardView", () => {
     expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
   });
 
-  it("shows only the averaged cost text on the estimated cost card", () => {
+  it("labels the selected-window cost average distinctly from a current projection", () => {
     const weeklyView = buildDashboardView(
       createDashboardOverview({
         summary: {
@@ -1250,6 +1297,19 @@ describe("buildDashboardView", () => {
 
     expect(weeklyView.stats[2]?.meta).toBe("Avg/day $8.00");
     expect(dailyView.stats[2]?.meta).toBe("Avg/hr $1.00");
+  });
+
+  it("keeps the existing estimate stat and adds only a compact recent known-cost pace", () => {
+    const overview = createDashboardOverview();
+    const view = buildDashboardView({ ...overview, apiSpendProjection: {
+      lookbackMinutes: 60, observedMinutes: 60, requests: 12, requestsWithCost: 10,
+      requestsWithUncachedComparison: 10, recordedCostUsd: 1,
+      projected24hUsd: 24, projectedUncached24hUsd: 48, cachedInputPercent: 90,
+      requestedPriorityDeliveredDefault: 5,
+    } }, createDefaultRequestLogs(), false);
+    expect(view.stats[2].label).toBe("Est. API Cost (7d)");
+    expect(view.stats[2].meta).toContain("Recent API-eq ≥ $24.00/day");
+    expect(view.stats).toHaveLength(5);
   });
 
   it("adds previous-window comparison indicators to requests tokens and cost cards", () => {
@@ -1385,7 +1445,7 @@ describe("buildDashboardView", () => {
     expect(zeroPreviousView.stats[2]?.comparison).toBeUndefined();
   });
 
-  it("places Conversations stat after Est. API Cost and before optional burn-rate/Error Rate", () => {
+  it("omits the Active Conversations statistic even when counts are present", () => {
     const overview = createDashboardOverview({
       summary: {
         primaryWindow: {
@@ -1416,11 +1476,9 @@ describe("buildDashboardView", () => {
     const convIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Conversations"));
     const errorIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Error rate"));
 
-    expect(convIdx).toBeGreaterThan(costIdx);
-    expect(convIdx).toBeGreaterThan(-1);
-    expect(errorIdx).toBeGreaterThan(convIdx);
+    expect(convIdx).toBe(-1);
+    expect(errorIdx).toBeGreaterThan(costIdx);
 
-    // With burn-rate enabled, conversation should still be between cost and burn-rate
     const viewWithBurn = buildDashboardView(overview, createDefaultRequestLogs(), { isDark: false, showAccountBurnrate: true });
 
     const costIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Est. API Cost"));
@@ -1428,8 +1486,8 @@ describe("buildDashboardView", () => {
     const burnIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Account burn"));
     const errorIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Error rate"));
 
-    expect(convIdxB).toBeGreaterThan(costIdxB);
-    expect(burnIdxB).toBeGreaterThan(convIdxB);
+    expect(convIdxB).toBe(-1);
+    expect(burnIdxB).toBeGreaterThan(costIdxB);
     expect(errorIdxB).toBeGreaterThan(burnIdxB);
   });
 
@@ -1492,130 +1550,12 @@ describe("buildDashboardView", () => {
     expect(convIdx).toBe(-1);
   });
 
-  it("formats Conversations stat as integer with thousand grouping, not compact abbreviation", () => {
-    const overview = createDashboardOverview({
-      summary: {
-        primaryWindow: {
-          remainingPercent: 80,
-          capacityCredits: 100,
-          remainingCredits: 80,
-          resetAt: null,
-          windowMinutes: 300,
-        },
-        secondaryWindow: null,
-        cost: { currency: "USD", totalUsd: 12.5 },
-        metrics: {
-          requests: 500,
-          conversationRequests: 0,
-          tokens: 2000,
-          cachedInputTokens: 300,
-          errorRate: 0.02,
-          errorCount: 10,
-          topError: null,
-          conversations: 1200,
-        },
-      },
-    });
-
+  it.each(["1d", "7d", "30d"] as const)("never renders Active Conversations for %s", (key) => {
+    const overview = createDashboardOverview();
+    overview.timeframe.key = key;
+    if (overview.summary.metrics) overview.summary.metrics.conversations = 1259;
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
-    expect(convStat?.value).toBe("1,200");
-    expect(convStat?.meta).toBe("Avg req/conv 0.0");
+    expect(view.stats.some((stat) => stat.label.includes("Conversations"))).toBe(false);
   });
 
-  it("formats Conversations stat above 1000 as grouped integer, not as '1.2K'", () => {
-    const overview = createDashboardOverview({
-      summary: {
-        primaryWindow: {
-          remainingPercent: 80,
-          capacityCredits: 100,
-          remainingCredits: 80,
-          resetAt: null,
-          windowMinutes: 300,
-        },
-        secondaryWindow: null,
-        cost: { currency: "USD", totalUsd: 12.5 },
-        metrics: {
-          requests: 500,
-          conversationRequests: 0,
-          tokens: 2000,
-          cachedInputTokens: 300,
-          errorRate: 0.02,
-          errorCount: 10,
-          topError: null,
-          conversations: 1523,
-        },
-      },
-    });
-
-    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
-    expect(convStat?.value).toBe("1,523");
-    // Must not use compact format
-    expect(convStat?.value).not.toContain("K");
-    expect(convStat?.value).not.toContain(".");
-  });
-
-  it("renders Avg req/conv metadata with one decimal ratio", () => {
-    const overview = createDashboardOverview({
-      summary: {
-        primaryWindow: {
-          remainingPercent: 80,
-          capacityCredits: 100,
-          remainingCredits: 80,
-          resetAt: null,
-          windowMinutes: 300,
-        },
-        secondaryWindow: null,
-        cost: { currency: "USD", totalUsd: 12.5 },
-        metrics: {
-          requests: 500,
-          tokens: 2000,
-          cachedInputTokens: 300,
-          errorRate: 0.02,
-          errorCount: 10,
-          topError: null,
-          conversations: 2,
-          conversationRequests: 5,
-        },
-      },
-    } as Parameters<typeof buildDashboardView>[0]);
-
-    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
-    expect(convStat).toBeDefined();
-    expect(convStat?.label).toBe("Active Conversations (7d)");
-    expect(convStat?.meta).toBe("Avg req/conv 2.5");
-  });
-
-  it("renders em-dash Avg req/conv metadata when conversations is zero", () => {
-    const overview = createDashboardOverview({
-      summary: {
-        primaryWindow: {
-          remainingPercent: 80,
-          capacityCredits: 100,
-          remainingCredits: 80,
-          resetAt: null,
-          windowMinutes: 300,
-        },
-        secondaryWindow: null,
-        cost: { currency: "USD", totalUsd: 12.5 },
-        metrics: {
-          requests: 500,
-          tokens: 2000,
-          cachedInputTokens: 300,
-          errorRate: 0.02,
-          errorCount: 10,
-          topError: null,
-          conversations: 0,
-          conversationRequests: 4,
-        },
-      },
-    } as Parameters<typeof buildDashboardView>[0]);
-
-    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
-    expect(convStat).toBeDefined();
-    expect(convStat?.meta).toBe("Avg req/conv —");
-  });
 });

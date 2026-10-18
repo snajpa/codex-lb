@@ -27,7 +27,9 @@ BOOTSTRAP_MODEL_SLUGS = {
 EXPECTED_CORE_MODEL_PLANS = {
     "plus",
     "pro",
+    "promax",
     "prolite",
+    "promax",
     "team",
     "business",
     "enterprise",
@@ -53,6 +55,44 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.2": "0.0.1",
     "codex-auto-review": "0.98.0",
 }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [None, 515_000])
+@pytest.mark.parametrize(
+    ("declared", "expected_input"),
+    [
+        ({}, None),
+        ({"input_context_window": 250_000}, 250_000),
+        ({"max_input_tokens": 320_000}, 320_000),
+        ({"input_context_window": 500_000, "max_input_tokens": 300_000}, 300_000),
+    ],
+)
+async def test_v1_models_input_ceiling_is_explicit_not_working_window(async_client, declared, expected_input, override):
+    model = replace(
+        _make_upstream_model("gpt-5.4", raw={"max_context_window": 872_000, **declared}),
+        context_window=272_000,
+    )
+    await get_model_registry().update({"pro": [model]})
+    if override is not None:
+        await _put_context_window_override(async_client, model.slug, override)
+    response = await async_client.get("/v1/models")
+    assert response.status_code == 200
+    item = next(row for row in response.json()["data"] if row["id"] == model.slug)
+    metadata = item["metadata"]
+    working_window = override if override is not None else 272_000
+    assert metadata["context_window"] == working_window
+    assert metadata["max_context_window"] == 872_000
+    assert item["context_length"] == item["capabilities"]["context_length"] == working_window
+    assert metadata.get("input_context_window") == expected_input
+
+
+@pytest.mark.parametrize("field", ["input_context_window", "max_input_tokens"])
+@pytest.mark.parametrize("value", [True, 0, -1, 272_000.0, "272000"])
+def test_v1_models_rejects_invalid_explicit_input_ceiling(field, value):
+    model = _make_upstream_model("gpt-5.4", raw={field: value})
+    with pytest.raises(ValueError, match="input"):
+        proxy_api._to_model_metadata(model, context_window=272_000)
 
 
 def _make_upstream_model(
@@ -180,12 +220,12 @@ async def test_v1_models_list(async_client):
         assert item["owned_by"] == "codex-lb"
         assert "metadata" in item
         assert item["api_types"] == ["chat_completions"]
-        assert item["capabilities"]["context_length"] == item["metadata"]["input_context_window"]
+        assert item["capabilities"]["context_length"] == item["metadata"]["context_window"]
         assert item["capabilities"]["supports_tool_use"] is True
         assert item["capabilities"]["supports_streaming"] is True
         assert item["capabilities"]["output_modalities"] == ["text"]
-        assert item["contextLength"] == item["metadata"]["input_context_window"]
-        assert item["context_length"] == item["metadata"]["input_context_window"]
+        assert item["contextLength"] == item["metadata"]["context_window"]
+        assert item["context_length"] == item["metadata"]["context_window"]
         assert item["supportsReasoning"] is True
         assert item["supports_reasoning"] is True
         assert item["supportsImages"] is True
@@ -268,7 +308,7 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
     for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
         entry = entries[slug]
         assert entry["metadata"]["context_window"] == 272_000
-        assert entry["metadata"]["input_context_window"] == 272_000
+        assert entry["metadata"].get("input_context_window") is None
         assert entry["capabilities"]["context_length"] == 272_000
         assert entry["context_length"] == 272_000
         assert entry["contextLength"] == 272_000
@@ -1419,7 +1459,7 @@ async def test_model_context_window_override(async_client):
     # An explicit operator override is the reported input budget too: generic
     # OpenAI-compatible clients read `context_length`/`contextLength` and would
     # otherwise cap themselves at the un-overridden upstream window.
-    assert metadata["input_context_window"] == 515000
+    assert metadata.get("input_context_window") is None
     assert v1_entry["capabilities"]["context_length"] == 515000
     assert v1_entry["contextLength"] == 515000
     assert v1_entry["context_length"] == 515000
@@ -1441,7 +1481,7 @@ async def test_model_context_window_override_clamped_to_max_context_window(async
     # `metadata.context_window` reports the same clamped value: the override is
     # resolved once, so the clamp cannot reintroduce a dual-budget split.
     assert v1_entry["metadata"]["context_window"] == 872_000
-    assert v1_entry["metadata"]["input_context_window"] == 872_000
+    assert v1_entry["metadata"].get("input_context_window") is None
     assert v1_entry["capabilities"]["context_length"] == 872_000
     assert v1_entry["contextLength"] == 872_000
     assert v1_entry["context_length"] == 872_000
@@ -1472,7 +1512,7 @@ async def test_model_context_window_override_applies_to_codex_models_data_alias(
     assert native_entry["context_window"] == 515_000
     alias_item = next(m for m in payload["data"] if m["id"] == "gpt-5.4")
     assert alias_item["metadata"]["context_window"] == 515_000
-    assert alias_item["metadata"]["input_context_window"] == 515_000
+    assert alias_item["metadata"].get("input_context_window") is None
     assert alias_item["capabilities"]["context_length"] == 515_000
     assert alias_item["contextLength"] == 515_000
     assert alias_item["context_length"] == 515_000
@@ -1583,7 +1623,7 @@ async def test_v1_models_reports_backend_context_window(async_client):
     for slug in ("gpt-5.4", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"):
         metadata = metadata_by_id[slug]
         assert metadata["context_window"] == 272_000
-        assert metadata["input_context_window"] == 272_000
+        assert metadata.get("input_context_window") is None
         assert metadata["max_output_tokens"] == 128_000
         entry = next(item for item in resp_v1.json()["data"] if item["id"] == slug)
         assert entry["api_types"] == ["chat_completions"]
@@ -1674,7 +1714,7 @@ async def test_v1_models_does_not_promote_raw_max_context_window(async_client):
     entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-custom")
 
     assert entry["metadata"]["context_window"] == 272_000
-    assert entry["metadata"]["input_context_window"] == 272_000
+    assert entry["metadata"].get("input_context_window") is None
     assert entry["metadata"].get("max_output_tokens") is None
 
 
