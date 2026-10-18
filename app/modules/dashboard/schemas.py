@@ -130,6 +130,34 @@ class WeeklyCreditPaceResponse(DashboardModel):
     confidence: WeeklyCreditPaceConfidence = "low"
 
 
+class AccountQuotaBurnResponse(DashboardModel):
+    account_id: str
+    window: Literal["primary", "secondary"]
+    window_minutes: int | None = None
+    remaining_percent: float
+    rate_percent_per_hour: float | None = None
+    observation_minutes: float = 0.0
+    sample_age_seconds: float
+    generated_at: datetime
+    freshness_seconds: float
+    stale: bool
+    reset_at: datetime | None = None
+    projected_exhaustion_at: datetime | None = None
+
+
+class ApiSpendProjectionResponse(DashboardModel):
+    lookback_minutes: int = 60
+    observed_minutes: float
+    requests: int
+    requests_with_cost: int
+    requests_with_uncached_comparison: int
+    recorded_cost_usd: float | None = None
+    projected_24h_usd: float | None = Field(default=None, alias="projected24hUsd")
+    projected_uncached_24h_usd: float | None = Field(default=None, alias="projectedUncached24hUsd")
+    cached_input_percent: float | None = None
+    requested_priority_delivered_default: int = 0
+
+
 class DashboardOverviewResponse(DashboardModel):
     last_sync_at: datetime | None = None
     timeframe: DashboardOverviewTimeframe
@@ -140,9 +168,12 @@ class DashboardOverviewResponse(DashboardModel):
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
+    quota_burn: list[AccountQuotaBurnResponse] = Field(default_factory=list)
+    api_spend_projection: ApiSpendProjectionResponse | None = None
 
 
 class DashboardProjectionsResponse(DashboardModel):
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
+    quota_burn: list[AccountQuotaBurnResponse] = Field(default_factory=list)

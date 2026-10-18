@@ -685,7 +685,7 @@ async def run_sticky_selection_path(
                     caps=caps,
                     stream_reserve_slots=stream_reserve_slots,
                 )
-            if cap_spillover_allowed and lease_kind == "stream":
+            if lease_kind == "stream" and (cap_spillover_allowed or sticky_kind != StickySessionKind.CODEX_SESSION):
                 # Stream selection immediately precedes response-create
                 # admission. Prefer an account that can satisfy both,
                 # while preserving the later create-cap error when all

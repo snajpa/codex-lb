@@ -14,6 +14,7 @@ from app.modules.dashboard.builders import (
     build_overview_timeframe,
     resolve_overview_timeframe,
 )
+from app.modules.dashboard.percentage_burn import build_percentage_burn
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
     DashboardMetricsComparison,
@@ -26,6 +27,7 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditApiKeyAttribution,
     WeeklyCreditPaceResponse,
 )
+from app.modules.dashboard.spend_projection import build_spend_projection
 from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, FLEET_BURN_WINDOW, build_weekly_credit_pace
 from app.modules.usage.builders import (
     align_bucket_window_start,
@@ -215,6 +217,17 @@ class DashboardService:
         )
         await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
 
+        spend_since = max(now - timedelta(hours=1), earliest_activity_at) if earliest_activity_at is not None else now
+        spend_since = min(now, spend_since)
+        spend_inputs = await self._repo.spend_projection_inputs(spend_since, now)
+        spend_projection = build_spend_projection(spend_inputs, since=spend_since, now=now)
+        quota_burn = build_percentage_burn(
+            accounts,
+            {},
+            secondary_history,
+            now=now,
+            usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+        )
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, monthly_usage, additional_ts),
@@ -224,6 +237,8 @@ class DashboardService:
             windows=windows,
             trends=trends,
             weekly_credit_pace=weekly_credit_pace,
+            quota_burn=quota_burn,
+            api_spend_projection=spend_projection,
         )
 
     async def get_projections(self) -> DashboardProjectionsResponse:
@@ -269,6 +284,13 @@ class DashboardService:
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,
+            quota_burn=build_percentage_burn(
+                accounts,
+                primary_history,
+                secondary_history,
+                now=now,
+                usage_refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+            ),
         )
 
 

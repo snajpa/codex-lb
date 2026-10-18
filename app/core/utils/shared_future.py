@@ -107,6 +107,7 @@ async def _await_task_deferring_cancellation(
 
     cancellation: asyncio.CancelledError | None = None
     result: _TaskResultT | None = None
+    failure: Exception | None = None
     # The anyio shield keeps a level-cancelled Starlette scope from re-raising
     # into every ``await``, which would otherwise busy-spin this loop until the
     # owned task completes. The shield only covers the task anyio tracks: when
@@ -130,6 +131,9 @@ async def _await_task_deferring_cancellation(
                 if task.cancelled():
                     raise
                 cancellation = cancellation or exc
+            except Exception as exc:
+                failure = exc
+                break
     if cancellation is None:
         # The shield also blocks the level cancellation this helper promises
         # to surface. Probe for it without suspending so callers still get
@@ -138,6 +142,11 @@ async def _await_task_deferring_cancellation(
             await checkpoint_if_cancelled()
         except asyncio.CancelledError as exc:
             cancellation = exc
+    if failure is not None:
+        # Joined cleanup failure must not erase a deferred caller cancellation.
+        if cancellation is not None:
+            raise cancellation from failure
+        raise failure
     return cast(_TaskResultT, result), cancellation
 
 

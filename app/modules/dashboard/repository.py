@@ -73,6 +73,20 @@ class ApiKeyAttributionRow:
     dominant_model: str
 
 
+@dataclass(frozen=True, slots=True)
+class SpendProjectionInput:
+    model: str
+    service_tier: str | None
+    requested_service_tier: str | None
+    actual_service_tier: str | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_tokens: int | None
+    cost_usd: float | None
+    model_source_kind: str | None
+
+
 class DashboardRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -176,6 +190,29 @@ class DashboardRepository:
 
     async def earliest_activity_at(self) -> datetime | None:
         return await self._logs_repo.earliest_activity_at()
+
+    async def spend_projection_inputs(self, since: datetime, until: datetime) -> list[SpendProjectionInput]:
+        columns = (
+            RequestLog.model,
+            RequestLog.service_tier,
+            RequestLog.requested_service_tier,
+            RequestLog.actual_service_tier,
+            RequestLog.input_tokens,
+            RequestLog.cached_input_tokens,
+            RequestLog.output_tokens,
+            RequestLog.reasoning_tokens,
+            RequestLog.cost_usd,
+            RequestLog.model_source_kind,
+        )
+        result = await self._session.execute(
+            select(*columns).where(
+                RequestLog.requested_at >= since,
+                RequestLog.requested_at < until,
+                RequestLog.deleted_at.is_(None),
+                RequestLogsRepository._exclude_warmup_clause(),
+            )
+        )
+        return [SpendProjectionInput(*row) for row in result.all()]
 
     async def top_api_key_attribution_since(
         self,

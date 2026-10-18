@@ -3,7 +3,9 @@
 ## Purpose
 
 Define dashboard surface contracts so settings, account management, and operational views stay coherent across the SPA.
+
 ## Requirements
+
 ### Requirement: Settings page
 
 The Settings page SHALL include sections for: routing settings (sticky threads,
@@ -1726,52 +1728,40 @@ conversation ID because the active URL-backed filter already identifies it.
 - **AND** literal backtick characters are absent
 
 ### Requirement: Dashboard and report metrics count distinct conversations
-
-Dashboard overview metrics MUST include a Conversations card between Est. API
-Cost and Error Rate, counting distinct non-empty conversation IDs in the
-selected timeframe. Report summary metrics MUST include a Conversations card
-immediately after Requests, counting distinct non-empty IDs across the complete
-filtered report range. A conversation spanning multiple days MUST count once in
-each applicable daily row and once in the report-wide total. Neither card MUST
-render a `{count} distinct` secondary label.
+Dashboard overview statistics MUST NOT render an Active Conversations card.
+Report summaries MUST retain their distinct non-empty conversation count card
+immediately after Requests. A conversation spanning days MUST count once per
+applicable daily row and once in the report-wide total. Existing conversation
+views, filters and API fields MUST remain available.
 
 #### Scenario: Dashboard count deduplicates IDs
-- **GIVEN** the selected dashboard timeframe contains repeated, null, and empty
-  conversation IDs
-- **WHEN** overview metrics are rendered
-- **THEN** the Conversations card counts each distinct non-empty ID once
-- **AND** the card is between Est. API Cost and Error Rate
+- **GIVEN** overview metrics contain repeated, null and empty conversation IDs
+- **WHEN** any overview timeframe is returned and rendered
+- **THEN** the API retains its distinct non-empty count and no Active Conversations statistic is shown
+- **AND** conversation views and request filtering remain usable
 
 #### Scenario: Report summary and daily counts use distinct IDs
-- **GIVEN** one conversation has requests on two report days and another has
-  requests on one day
+- **GIVEN** one conversation spans two report days and another appears once
 - **WHEN** report metrics are rendered
-- **THEN** the summary counts two distinct conversations overall
-- **AND** each applicable daily row counts the spanning conversation once
-- **AND** the Conversations summary card is immediately after Requests
+- **THEN** the summary counts two conversations overall
+- **AND** daily rows retain their applicable distinct counts
 
 ### Requirement: Dashboard conversation trends are bucketed distinctly
-
-The dashboard overview response MUST expose `trends.conversations` with one
-point for each configured timeframe bucket. Each point MUST count distinct,
-non-empty conversation IDs within that bucket, and a conversation repeated
-across models or service tiers in one bucket MUST count once. Missing buckets
-MUST be zero. The Conversations card MUST use this series, while its summary
-total MUST remain the exact timeframe aggregate rather than a sum of trend
-points.
+The overview API MUST retain bucketed distinct non-empty conversation counts,
+with missing buckets zero-filled and repeated IDs counted once per bucket.
+The timeframe summary MUST remain an exact distinct aggregate, not a sum of
+buckets. Removing the dashboard count card MUST NOT remove these API contracts.
 
 #### Scenario: Conversation trend de-duplicates model groups
-- **GIVEN** one bucket contains the same conversation ID under two models and a
-  second distinct conversation ID under one model
-- **WHEN** the dashboard overview trends are rendered
-- **THEN** the populated bucket's conversation point is `2`
-- **AND** the series contains one point per configured bucket
+- **GIVEN** repeated IDs occur across models in one bucket
+- **WHEN** overview trends are returned
+- **THEN** that bucket counts each ID once
+- **AND** the series has every configured bucket with absent counts zero-filled
 
 #### Scenario: Empty conversation buckets are zero-filled
-- **GIVEN** the selected dashboard timeframe has no valid conversation IDs in
-  one or more buckets
-- **WHEN** the dashboard overview response is built
-- **THEN** each empty bucket's conversation point is `0`
+- **GIVEN** the selected timeframe has no valid IDs in one or more buckets
+- **WHEN** overview conversation trends are returned
+- **THEN** each empty bucket remains zero-filled
 
 ### Requirement: Report conversation columns sort and export
 
@@ -4220,3 +4210,66 @@ model-source models without assuming one global effort vocabulary.
 - **AND** the operator MUST still be able to replace that seed with arbitrary
   effort slugs before saving.
 
+### Requirement: Truthful Pro Max usage presentation
+
+The dashboard SHALL display `promax` as Pro 500 and retain its observed
+percentage usage. Estimated-credit subtotals SHALL visibly identify
+unquantified accounts. A window containing only unquantified accounts
+SHALL indicate unknown allowance rather than zero or exhausted allowance.
+Incomplete weekly coverage SHALL suppress fleet credit forecasts before
+using retained projections or local fallback calculations.
+
+#### Scenario: Mixed dashboard quota
+- **GIVEN** the Pro Max credit calibration is unavailable
+- **WHEN** a reported Pro Max weekly window is present alongside known plans
+- **THEN** its observed remaining percentage is visible
+- **AND** the subtotal excludes it explicitly
+- **AND** no complete-fleet runway is presented
+
+#### Scenario: Stale forecast cannot conceal incomplete coverage
+- **WHEN** old forecast projections exist and current weekly coverage is incomplete
+- **THEN** the dashboard does not resurrect a fleet forecast from those projections
+- **AND** the unknown allowance explanation remains visible on desktop and mobile
+
+#### Scenario: Search the displayed Pro Max plan
+- **WHEN** an operator searches accounts by `Pro 500` or `promax`
+- **THEN** the Pro Max account remains selectable
+- **AND** the stored plan identifier is unchanged
+
+### Requirement: Dashboard account list uses page scrolling
+The dashboard account table MUST render all supplied account rows without a
+fixed or maximum body height or inner vertical scroll limit. It MUST retain
+sorting, actions, responsive layout and horizontal overflow where required.
+Normal page scrolling MAY be used to reach lower rows.
+
+#### Scenario: More than eight accounts remain visible in document flow
+- **GIVEN** the dashboard receives twelve accounts
+- **WHEN** account list view is rendered
+- **THEN** all twelve rows exist in normal document flow
+- **AND** the table body has no capped height or vertical scroll container
+
+### Requirement: Percentage quota burn remains useful without credit allowance
+The quota-estimate API MUST retain explicitly labelled percentage-per-hour burn and account-level runway without requiring an absolute credit allowance. Unknown rates MUST remain distinct from measured zero. The dashboard MUST retain the existing upstream credit/runway card and MUST NOT add a separate percentage-runway section. Missing calibration MUST NOT fabricate credit totals or whole-pool forecasts.
+
+#### Scenario: Pro Max with unknown credits has percentage estimates
+- **GIVEN** fresh same-window percentage observations exist for a Pro Max account
+- **AND** its absolute included-credit allowance is unknown
+- **WHEN** quota estimates are requested through the existing dashboard API
+- **THEN** measured percentage burn and account runway are returned with their units
+- **AND** absolute credits and account-equivalent credit forecasts remain unknown
+
+#### Scenario: A reset invalidates the previous rate
+- **GIVEN** recent observations straddle a quota reset
+- **WHEN** percentage burn is computed
+- **THEN** pre-reset consumption is excluded from the current-window rate
+- **AND** insufficient current-window observations show an unknown rate
+
+### Requirement: Preserve familiar upstream dashboard layout
+The dashboard SHALL retain the upstream StatsGrid, usage-donut and WeeklyCreditsPaceCard layout and styling. It SHALL NOT render separate full-width quota-runway or API-spend sections. The Active Conversations overview statistic SHALL remain omitted and all account-list rows SHALL remain in normal document flow without a capped inner vertical scroller. Any supplemental estimate SHALL occupy the existing stat metadata, not a new layout section.
+
+#### Scenario: Calibrated account pool uses existing projection
+- **GIVEN** calibrated Pro Max accounts with fresh weekly observations and known reset timestamps
+- **WHEN** the dashboard consumes the overview and projections
+- **THEN** the existing weekly credit projection card is rendered with credit pace and runway
+- **AND** no added full-width forecast sections or conversation statistic appears
+- **AND** every account row can be reached through ordinary document scrolling

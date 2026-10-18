@@ -42,6 +42,7 @@ from app.core.metrics.prometheus import (
 from app.core.openai.requests import (
     ResponsesRequest,
 )
+from app.core.utils.async_iterator import _owned_response_iterator
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
@@ -478,26 +479,29 @@ class _HTTPBridgeOwnerForwardingMixin:
                 _signal_propagated_responses_owner_forward_rejected()
 
         try:
-            async for event_block in self._http_bridge_owner_client.stream_responses(
-                owner_endpoint=owner_forward.owner_endpoint,
-                payload=payload,
-                headers=forward_headers,
-                context=forward_context,
-                request_started_at=request_started_at,
-                on_request_dispatched=owner_request_dispatched,
-                on_response_rejected=owner_response_rejected,
-                on_response_wait=_signal_propagated_capacity_startup_wait,
-                on_response_ready=owner_response_ready,
-                scheduler=scheduler_for(self),
-                clock=clock,
-            ):
-                forwarded_any = True
-                event_payload = parse_sse_data_json(event_block)
-                event_type = _event_type_from_payload(None, event_payload)
-                forwarded_response_id = _websocket_response_id(None, event_payload) or forwarded_response_id
-                if event_type == "response.failed" and forwarded_response_id is None:
-                    forwarded_response_id = get_request_id()
-                yield event_block
+            async with _owned_response_iterator(
+                self._http_bridge_owner_client.stream_responses(
+                    owner_endpoint=owner_forward.owner_endpoint,
+                    payload=payload,
+                    headers=forward_headers,
+                    context=forward_context,
+                    request_started_at=request_started_at,
+                    on_request_dispatched=owner_request_dispatched,
+                    on_response_rejected=owner_response_rejected,
+                    on_response_wait=_signal_propagated_capacity_startup_wait,
+                    on_response_ready=owner_response_ready,
+                    scheduler=scheduler_for(self),
+                    clock=clock,
+                )
+            ) as owner_events:
+                async for event_block in owner_events:
+                    forwarded_any = True
+                    event_payload = parse_sse_data_json(event_block)
+                    event_type = _event_type_from_payload(None, event_payload)
+                    forwarded_response_id = _websocket_response_id(None, event_payload) or forwarded_response_id
+                    if event_type == "response.failed" and forwarded_response_id is None:
+                        forwarded_response_id = get_request_id()
+                    yield event_block
         except OwnerForwardRelayFailure as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()

@@ -44,6 +44,7 @@ from app.core.errors import synthetic_stream_failure_event as response_failed_ev
 from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.utils.async_iterator import _owned_response_iterator
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
@@ -591,365 +592,383 @@ class _StreamingMixin(_StreamingRetryMixin):
                 optional_kwargs=stream_optional_kwargs,
                 raise_for_status=True,
             )
-            iterator = _facade()._stream_iterator_after_capacity_admission(stream)
-            try:
-                first = await iterator.__anext__()
-            except StopAsyncIteration:
-                response_create_lease.release()
-                await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                account_response_create_lease = None
-                status = "error"
-                error_code = "stream_incomplete"
-                error_message = "Upstream websocket closed before response.completed"
-                settlement.record_success = False
-                terminal_event_seen = settlement.account_health_error = True
-                settlement.error = {"message": error_message}
-                yield _stream_transport_failure_event_or_raise(
-                    error_code,
-                    error_message,
-                    response_id=request_id,
-                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-                )
-                return
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                response_create_lease.release()
-                await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                account_response_create_lease = None
-                status = "error"
-                error_code = "upstream_unavailable"
-                error_message = str(exc) or "Request to upstream timed out"
-                settlement.record_success = False
-                terminal_event_seen = settlement.account_health_error = True
-                settlement.error = {"message": error_message}
-                yield _stream_transport_failure_event_or_raise(
-                    error_code,
-                    error_message,
-                    response_id=request_id,
-                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-                )
-                return
-            response_create_lease.release()
-            await proxy._load_balancer.release_account_lease(account_response_create_lease)
-            account_response_create_lease = None
-            first_payload = parse_sse_data_json(first)
-            event_type = classify_event_type(first_payload)
-            event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-            _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
-            preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
-            malformed_error_rewrite = _rewrite_malformed_stream_error_event(
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                event=event,
-                event_type=event_type,
-                event_payload=first_payload,
-                response_id=response_id,
-            )
-            if malformed_error_rewrite is not None:
-                first, event, first_payload, event_type = malformed_error_rewrite
-            terminal_event_seen, response_id, usage = _settle_bg_ack(settlement, payload, first_payload, response_id)
-            if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                await _touch_api_key_reservation()
-            event_service_tier = _facade()._service_tier_from_event_payload(first_payload)
-            if event_service_tier is not None:
-                actual_service_tier = event_service_tier
-                service_tier = event_service_tier
-            if event and event.response and event.response.id:
-                response_id = event.response.id
-                settlement.response_id = response_id
-            terminal_stream_error: _TerminalStreamError | None = None
-            if event and event.type in ("response.failed", "error"):
-                if event.type == "response.failed":
-                    response = event.response
-                    error = response.error if response else None
-                else:
-                    error = event.error
-                response_id = (
-                    event.response.id
-                    if event.type == "response.failed" and event.response and event.response.id
-                    else request_id
-                )
-                if preserve_raw_sse_line and error is None:
-                    raw_error_type, raw_error_message, raw_error_param, code = _raw_error_fields(
-                        event_type,
-                        first_payload,
-                    )
-                    settlement.error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
-                else:
-                    raw_error_type = error.type if error else None
-                    raw_error_message = error.message if error else None
-                    raw_error_param = error.param_state if error else None
-                    code = _normalize_error_code(
-                        error.code if error else None,
-                        raw_error_type,
-                    )
-                code = _classify_terminal_stream_error_frame(event_type, first_payload, code, raw_error_message)
-                rewritten_error = _facade()._rewrite_previous_response_stream_error(
-                    previous_response_id=payload.previous_response_id,
-                    preferred_account_id=preferred_account_id,
-                    error_code=code,
-                    error_type=raw_error_type,
-                    error_message=raw_error_message,
-                    error_param=raw_error_param,
-                )
-                status = "error"
-                if not (preserve_raw_sse_line and error is None):
-                    settlement.error = _upstream_error_from_openai(error)
-                upstream_error: UpstreamError = settlement.error or cast(UpstreamError, {"message": "Upstream error"})
-                settlement.record_success = False
-                if rewritten_error is not None:
-                    rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                    first, event, first_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
-                        response_id=response_id,
-                        error_code=rewritten_code,
-                        error_message=rewritten_message,
-                    )
-                    error_code = rewritten_code
-                    error_message = rewritten_message
-                    await _record_or_defer_owner_recovery_health(upstream_error, upstream_error_code)
-                    upstream_error = cast(
-                        UpstreamError, {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code}
-                    )
-                else:
-                    error_code = code
-                    error_message = raw_error_message
-                    if error_code == "stream_incomplete":
-                        failure_metadata = _RequestLogFailureMetadata(
-                            failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
-                        )
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(code, error_message)
-                    if allow_retry and code == "stream_idle_timeout":
-                        raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                    if allow_retry and _facade()._is_security_work_authorization_required_error(code, error_message):
-                        error_code = _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
-                        raise _RetryableStreamError(
-                            _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
-                            upstream_error,
-                        )
-                    if allow_retry and _facade()._should_retry_stream_error(code, error_message):
-                        raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                terminal_stream_error = _TerminalStreamError(
-                    error_code or code,
-                    upstream_error,
-                )
-                if allow_retry:
-                    _facade().logger.info(
-                        "Not retrying non-recoverable stream failure request_id=%s account_id=%s code=%s",
-                        request_id,
-                        account_id_value,
-                        error_code or code,
-                    )
-            elif preserve_raw_sse_line:
-                _, error_message, _, code = _raw_error_fields(event_type, first_payload)
-                status = "error"
-                error_code = code
-                settlement.error = {"message": error_message or "Upstream error"}
-                settlement.record_success = False
-                settlement.account_health_error = False
-            if event and event.type in ("response.completed", "response.incomplete"):
-                usage = event.response.usage if event.response else None
-                if event.response and event.response.id:
-                    response_id = event.response.id
-                if event.type == "response.incomplete":
+            async with _owned_response_iterator(stream):
+                iterator = _facade()._stream_iterator_after_capacity_admission(stream)
+                try:
+                    first = await iterator.__anext__()
+                except StopAsyncIteration:
+                    response_create_lease.release()
+                    await proxy._load_balancer.release_account_lease(account_response_create_lease)
+                    account_response_create_lease = None
                     status = "error"
-
-            if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                saw_text_delta = True
-            if not _facade()._should_suppress_text_done_event(
-                event_type=event_type,
-                payload=first_payload,
-                suppress_text_done_events=suppress_text_done_events,
-                saw_text_delta=saw_text_delta,
-            ):
-                first, first_payload, event, event_type = _rewrite_tool_call_line(first, first_payload, event=event)
-                if mark_duplicate_tool_call_downstream_event(
-                    first_payload,
-                    seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=tool_call_response_id_from_payload(first_payload) or request_id,
-                    scope_side_effects_by_response_id=False,
-                ):
-                    suppressed_duplicate_tool_call = True
-                else:
-                    if first_payload is not None and not preserve_raw_sse_line:
-                        first = format_sse_event(first_payload)
-                    terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
-                    if latency_first_token_ms is None:
-                        latency_first_token_ms = _ttft_event_latency_ms(
-                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
-                        )
-                    settlement.downstream_visible = True
-                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                        settlement.downstream_text_visible = True
-                    yield first
-            if terminal_stream_error is not None:
-                raise terminal_stream_error
-            async for line in iterator:
-                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
-                    await _touch_api_key_reservation()
-                    if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                        saw_text_delta = settlement.downstream_text_visible = True
-                    settlement.downstream_visible = True
-                    yield line
-                    continue
-                event_payload = parse_sse_data_json(line)
-                event_type = classify_event_type(event_payload)
-                event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
-                _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
+                    error_code = "stream_incomplete"
+                    error_message = "Upstream websocket closed before response.completed"
+                    settlement.record_success = False
+                    terminal_event_seen = settlement.account_health_error = True
+                    settlement.error = {"message": error_message}
+                    yield _stream_transport_failure_event_or_raise(
+                        error_code,
+                        error_message,
+                        response_id=request_id,
+                        preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                    )
+                    return
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    response_create_lease.release()
+                    await proxy._load_balancer.release_account_lease(account_response_create_lease)
+                    account_response_create_lease = None
+                    status = "error"
+                    error_code = "upstream_unavailable"
+                    error_message = str(exc) or "Request to upstream timed out"
+                    settlement.record_success = False
+                    terminal_event_seen = settlement.account_health_error = True
+                    settlement.error = {"message": error_message}
+                    yield _stream_transport_failure_event_or_raise(
+                        error_code,
+                        error_message,
+                        response_id=request_id,
+                        preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                    )
+                    return
+                response_create_lease.release()
+                await proxy._load_balancer.release_account_lease(account_response_create_lease)
+                account_response_create_lease = None
+                first_payload = parse_sse_data_json(first)
+                event_type = classify_event_type(first_payload)
+                event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+                _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     event=event,
                     event_type=event_type,
-                    event_payload=event_payload,
+                    event_payload=first_payload,
                     response_id=response_id,
                 )
                 if malformed_error_rewrite is not None:
-                    line, event, event_payload, event_type = malformed_error_rewrite
+                    first, event, first_payload, event_type = malformed_error_rewrite
+                terminal_event_seen, response_id, usage = _settle_bg_ack(
+                    settlement, payload, first_payload, response_id
+                )
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                     await _touch_api_key_reservation()
-                event_service_tier = _facade()._service_tier_from_event_payload(event_payload)
+                event_service_tier = _facade()._service_tier_from_event_payload(first_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
-                line, event_payload, event, event_type = _rewrite_tool_call_line(line, event_payload, event=event)
-                if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                    saw_text_delta = True
-                if _facade()._should_suppress_text_done_event(
-                    event_type=event_type,
-                    payload=event_payload,
-                    suppress_text_done_events=suppress_text_done_events,
-                    saw_text_delta=saw_text_delta,
-                ):
-                    continue
-                if event:
-                    if event_type in ("response.failed", "error"):
-                        status = "error"
-                        if event_type == "response.failed":
-                            response = event.response
-                            error = response.error if response else None
-                            if response and response.id:
-                                response_id = response.id
-                                settlement.response_id = response_id
-                        else:
-                            error = event.error
-                        raw_error_type, raw_error_message, raw_error_param = _openai_error_fields(error)
-                        if preserve_raw_sse_line and error is None:
-                            raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
-                                event_type,
-                                event_payload,
-                            )
-                            upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
-                        else:
-                            raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
-                            upstream_error = _upstream_error_from_openai(error)
-                        raw_error_code = _classify_terminal_stream_error_frame(
-                            event_type, event_payload, raw_error_code, raw_error_message
+                if event and event.response and event.response.id:
+                    response_id = event.response.id
+                    settlement.response_id = response_id
+                terminal_stream_error: _TerminalStreamError | None = None
+                if event and event.type in ("response.failed", "error"):
+                    if event.type == "response.failed":
+                        response = event.response
+                        error = response.error if response else None
+                    else:
+                        error = event.error
+                    response_id = (
+                        event.response.id
+                        if event.type == "response.failed" and event.response and event.response.id
+                        else request_id
+                    )
+                    if preserve_raw_sse_line and error is None:
+                        raw_error_type, raw_error_message, raw_error_param, code = _raw_error_fields(
+                            event_type,
+                            first_payload,
                         )
-                        rewritten_error = _facade()._rewrite_previous_response_stream_error(
-                            previous_response_id=payload.previous_response_id,
-                            preferred_account_id=preferred_account_id,
-                            error_code=raw_error_code,
-                            error_type=raw_error_type,
-                            error_message=raw_error_message,
-                            error_param=raw_error_param,
+                        settlement.error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
+                    else:
+                        raw_error_type = error.type if error else None
+                        raw_error_message = error.message if error else None
+                        raw_error_param = error.param_state if error else None
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            raw_error_type,
                         )
-                        if rewritten_error is not None:
-                            response_id = (
-                                event.response.id
-                                if event_type == "response.failed" and event.response and event.response.id
-                                else request_id
-                            )
-                            rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                            (
-                                line,
-                                event,
-                                event_payload,
-                                event_type,
-                            ) = _facade()._build_rewritten_stream_response_failed_event(
+                    code = _classify_terminal_stream_error_frame(event_type, first_payload, code, raw_error_message)
+                    rewritten_error = _facade()._rewrite_previous_response_stream_error(
+                        previous_response_id=payload.previous_response_id,
+                        preferred_account_id=preferred_account_id,
+                        error_code=code,
+                        error_type=raw_error_type,
+                        error_message=raw_error_message,
+                        error_param=raw_error_param,
+                    )
+                    status = "error"
+                    if not (preserve_raw_sse_line and error is None):
+                        settlement.error = _upstream_error_from_openai(error)
+                    upstream_error: UpstreamError = settlement.error or cast(
+                        UpstreamError, {"message": "Upstream error"}
+                    )
+                    settlement.record_success = False
+                    if rewritten_error is not None:
+                        rewritten_code, rewritten_message, upstream_error_code = rewritten_error
+                        first, event, first_payload, event_type = (
+                            _facade()._build_rewritten_stream_response_failed_event(
                                 response_id=response_id,
                                 error_code=rewritten_code,
                                 error_message=rewritten_message,
                             )
-                            error_code = rewritten_code
-                            error_message = rewritten_message
-                            settlement.error = _upstream_error_from_openai(error)
-                            settlement.record_success = False
-                            await _record_or_defer_owner_recovery_health(
-                                _upstream_error_from_openai(error), upstream_error_code
+                        )
+                        error_code = rewritten_code
+                        error_message = rewritten_message
+                        await _record_or_defer_owner_recovery_health(upstream_error, upstream_error_code)
+                        upstream_error = cast(
+                            UpstreamError,
+                            {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code},
+                        )
+                    else:
+                        error_code = code
+                        error_message = raw_error_message
+                        if error_code == "stream_incomplete":
+                            failure_metadata = _RequestLogFailureMetadata(
+                                failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
                             )
-                        else:
-                            error_code = raw_error_code
-                            error_message = raw_error_message
-                            settlement.error = upstream_error
-                            settlement.record_success = False
-                            if error_code == "stream_incomplete":
-                                failure_metadata = _RequestLogFailureMetadata(
-                                    failure_phase="upstream",
-                                    failure_detail="upstream_eof_before_terminal_event",
-                                )
-                            if preserve_raw_sse_line and error is None:
-                                settlement.account_health_error = not saw_text_delta
-                            else:
-                                settlement.account_health_error = (
-                                    _facade()._should_penalize_stream_error(error_code, error_message)
-                                    and not saw_text_delta
-                                )
+                        settlement.account_health_error = _facade()._should_penalize_stream_error(code, error_message)
+                        if allow_retry and code == "stream_idle_timeout":
+                            raise _RetryableStreamError(code, upstream_error, exclude_account=True)
+                        if allow_retry and _facade()._is_security_work_authorization_required_error(
+                            code, error_message
+                        ):
+                            error_code = _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
+                            raise _RetryableStreamError(
+                                _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                upstream_error,
+                            )
+                        if allow_retry and _facade()._should_retry_stream_error(code, error_message):
+                            raise _RetryableStreamError(code, upstream_error, exclude_account=True)
+                    terminal_stream_error = _TerminalStreamError(
+                        error_code or code,
+                        upstream_error,
+                    )
+                    if allow_retry:
+                        _facade().logger.info(
+                            "Not retrying non-recoverable stream failure request_id=%s account_id=%s code=%s",
+                            request_id,
+                            account_id_value,
+                            error_code or code,
+                        )
                 elif preserve_raw_sse_line:
-                    _, raw_error_message, _, raw_error_code = _raw_error_fields(
-                        event_type,
-                        event_payload,
-                    )
-                    _observe_terminal_stream_error_frame(raw_error_code, raw_error_message)
+                    _, error_message, _, code = _raw_error_fields(event_type, first_payload)
                     status = "error"
-                    error_code = raw_error_code
-                    error_message = raw_error_message
-                    settlement.error = {"message": raw_error_message or "Upstream error"}
-                    settlement.record_success = False
-                    settlement.account_health_error = not saw_text_delta
-                if event_type in ("response.completed", "response.incomplete"):
-                    response = event.response if event is not None else None
-                    usage = response.usage if response else None
-                    if response and response.id:
-                        response_id = response.id
-                        settlement.response_id = response_id
-                    if event_type == "response.incomplete":
-                        status = "error"
-                if event_type == "response.completed" and suppressed_duplicate_tool_call:
-                    (
-                        line,
-                        event,
-                        event_payload,
-                        event_type,
-                    ) = _facade()._build_rewritten_stream_response_failed_event(
-                        response_id=response_id,
-                        error_code=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
-                        error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
-                    )
-                    status = "error"
-                    error_code = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
-                    error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
+                    error_code = code
+                    settlement.error = {"message": error_message or "Upstream error"}
                     settlement.record_success = False
                     settlement.account_health_error = False
-                if latency_first_token_ms is None:
-                    latency_first_token_ms = _ttft_event_latency_ms(
-                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
-                    )
-                if mark_duplicate_tool_call_downstream_event(
-                    event_payload,
-                    seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
-                    response_id=tool_call_response_id_from_payload(event_payload) or request_id,
-                    scope_side_effects_by_response_id=False,
-                ):
-                    suppressed_duplicate_tool_call = True
-                    continue
-                if event_payload is not None and not preserve_raw_sse_line:
-                    line = format_sse_event(event_payload)
-                settlement.downstream_visible = True
+                if event and event.type in ("response.completed", "response.incomplete"):
+                    usage = event.response.usage if event.response else None
+                    if event.response and event.response.id:
+                        response_id = event.response.id
+                    if event.type == "response.incomplete":
+                        status = "error"
+
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                    settlement.downstream_text_visible = True
-                terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
-                yield line
-            if not terminal_event_seen:
-                status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
+                    saw_text_delta = True
+                if not _facade()._should_suppress_text_done_event(
+                    event_type=event_type,
+                    payload=first_payload,
+                    suppress_text_done_events=suppress_text_done_events,
+                    saw_text_delta=saw_text_delta,
+                ):
+                    first, first_payload, event, event_type = _rewrite_tool_call_line(first, first_payload, event=event)
+                    if mark_duplicate_tool_call_downstream_event(
+                        first_payload,
+                        seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
+                        response_id=tool_call_response_id_from_payload(first_payload) or request_id,
+                        scope_side_effects_by_response_id=False,
+                    ):
+                        suppressed_duplicate_tool_call = True
+                    else:
+                        if first_payload is not None and not preserve_raw_sse_line:
+                            first = format_sse_event(first_payload)
+                        terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
+                        if latency_first_token_ms is None:
+                            latency_first_token_ms = _ttft_event_latency_ms(
+                                event_type,
+                                first_payload,
+                                ttft_reasoning_deltas,
+                                attempt_started_at,
+                                now=clock.monotonic(),
+                            )
+                        settlement.downstream_visible = True
+                        if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                            settlement.downstream_text_visible = True
+                        yield first
+                if terminal_stream_error is not None:
+                    raise terminal_stream_error
+                async for line in iterator:
+                    if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                        await _touch_api_key_reservation()
+                        if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                            saw_text_delta = settlement.downstream_text_visible = True
+                        settlement.downstream_visible = True
+                        yield line
+                        continue
+                    event_payload = parse_sse_data_json(line)
+                    event_type = classify_event_type(event_payload)
+                    event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+                    _publish_http_response_owner(
+                        proxy, event, event_payload, line, account_id_value, api_key, session_id
+                    )
+                    preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
+                    malformed_error_rewrite = _rewrite_malformed_stream_error_event(
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        event=event,
+                        event_type=event_type,
+                        event_payload=event_payload,
+                        response_id=response_id,
+                    )
+                    if malformed_error_rewrite is not None:
+                        line, event, event_payload, event_type = malformed_error_rewrite
+                    if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                        await _touch_api_key_reservation()
+                    event_service_tier = _facade()._service_tier_from_event_payload(event_payload)
+                    if event_service_tier is not None:
+                        actual_service_tier = event_service_tier
+                        service_tier = event_service_tier
+                    line, event_payload, event, event_type = _rewrite_tool_call_line(line, event_payload, event=event)
+                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                        saw_text_delta = True
+                    if _facade()._should_suppress_text_done_event(
+                        event_type=event_type,
+                        payload=event_payload,
+                        suppress_text_done_events=suppress_text_done_events,
+                        saw_text_delta=saw_text_delta,
+                    ):
+                        continue
+                    if event:
+                        if event_type in ("response.failed", "error"):
+                            status = "error"
+                            if event_type == "response.failed":
+                                response = event.response
+                                error = response.error if response else None
+                                if response and response.id:
+                                    response_id = response.id
+                                    settlement.response_id = response_id
+                            else:
+                                error = event.error
+                            raw_error_type, raw_error_message, raw_error_param = _openai_error_fields(error)
+                            if preserve_raw_sse_line and error is None:
+                                raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
+                                    event_type,
+                                    event_payload,
+                                )
+                                upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
+                            else:
+                                raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
+                                upstream_error = _upstream_error_from_openai(error)
+                            raw_error_code = _classify_terminal_stream_error_frame(
+                                event_type, event_payload, raw_error_code, raw_error_message
+                            )
+                            rewritten_error = _facade()._rewrite_previous_response_stream_error(
+                                previous_response_id=payload.previous_response_id,
+                                preferred_account_id=preferred_account_id,
+                                error_code=raw_error_code,
+                                error_type=raw_error_type,
+                                error_message=raw_error_message,
+                                error_param=raw_error_param,
+                            )
+                            if rewritten_error is not None:
+                                response_id = (
+                                    event.response.id
+                                    if event_type == "response.failed" and event.response and event.response.id
+                                    else request_id
+                                )
+                                rewritten_code, rewritten_message, upstream_error_code = rewritten_error
+                                (
+                                    line,
+                                    event,
+                                    event_payload,
+                                    event_type,
+                                ) = _facade()._build_rewritten_stream_response_failed_event(
+                                    response_id=response_id,
+                                    error_code=rewritten_code,
+                                    error_message=rewritten_message,
+                                )
+                                error_code = rewritten_code
+                                error_message = rewritten_message
+                                settlement.error = _upstream_error_from_openai(error)
+                                settlement.record_success = False
+                                await _record_or_defer_owner_recovery_health(
+                                    _upstream_error_from_openai(error), upstream_error_code
+                                )
+                            else:
+                                error_code = raw_error_code
+                                error_message = raw_error_message
+                                settlement.error = upstream_error
+                                settlement.record_success = False
+                                if error_code == "stream_incomplete":
+                                    failure_metadata = _RequestLogFailureMetadata(
+                                        failure_phase="upstream",
+                                        failure_detail="upstream_eof_before_terminal_event",
+                                    )
+                                if preserve_raw_sse_line and error is None:
+                                    settlement.account_health_error = not saw_text_delta
+                                else:
+                                    settlement.account_health_error = (
+                                        _facade()._should_penalize_stream_error(error_code, error_message)
+                                        and not saw_text_delta
+                                    )
+                    elif preserve_raw_sse_line:
+                        _, raw_error_message, _, raw_error_code = _raw_error_fields(
+                            event_type,
+                            event_payload,
+                        )
+                        _observe_terminal_stream_error_frame(raw_error_code, raw_error_message)
+                        status = "error"
+                        error_code = raw_error_code
+                        error_message = raw_error_message
+                        settlement.error = {"message": raw_error_message or "Upstream error"}
+                        settlement.record_success = False
+                        settlement.account_health_error = not saw_text_delta
+                    if event_type in ("response.completed", "response.incomplete"):
+                        response = event.response if event is not None else None
+                        usage = response.usage if response else None
+                        if response and response.id:
+                            response_id = response.id
+                            settlement.response_id = response_id
+                        if event_type == "response.incomplete":
+                            status = "error"
+                    if event_type == "response.completed" and suppressed_duplicate_tool_call:
+                        (
+                            line,
+                            event,
+                            event_payload,
+                            event_type,
+                        ) = _facade()._build_rewritten_stream_response_failed_event(
+                            response_id=response_id,
+                            error_code=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
+                            error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
+                        )
+                        status = "error"
+                        error_code = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
+                        error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
+                        settlement.record_success = False
+                        settlement.account_health_error = False
+                    if latency_first_token_ms is None:
+                        latency_first_token_ms = _ttft_event_latency_ms(
+                            event_type, event_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
+                        )
+                    if mark_duplicate_tool_call_downstream_event(
+                        event_payload,
+                        seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
+                        response_id=tool_call_response_id_from_payload(event_payload) or request_id,
+                        scope_side_effects_by_response_id=False,
+                    ):
+                        suppressed_duplicate_tool_call = True
+                        continue
+                    if event_payload is not None and not preserve_raw_sse_line:
+                        line = format_sse_event(event_payload)
+                    settlement.downstream_visible = True
+                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                        settlement.downstream_text_visible = True
+                    terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
+                    yield line
+                if not terminal_event_seen:
+                    status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
         except ProxyResponseError as exc:
+            if terminal_event_seen:
+                raise
             response_create_lease.release()
             failure_metadata = _facade()._request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
@@ -988,6 +1007,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.account_health_error = _facade()._should_penalize_stream_error(error_code, error_message)
             raise
         except UpstreamProxyRouteError as exc:
+            if terminal_event_seen:
+                raise
             route_fail_closed_reason = exc.reason
             status = "error"
             error_code = "upstream_proxy_unavailable"
@@ -1010,6 +1031,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
             raise
         except Exception:
+            if terminal_event_seen:
+                raise
             if settlement.downstream_visible:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
                 yield _stream_transport_failure_event_or_raise(

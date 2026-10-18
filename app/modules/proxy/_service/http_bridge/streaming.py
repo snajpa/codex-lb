@@ -53,6 +53,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.types import JsonObject, JsonValue
+from app.core.utils.async_iterator import _owned_response_iterator
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_block_with_payload
 from app.core.utils.time import utcnow
@@ -1073,23 +1074,26 @@ class _HTTPBridgeStreamingMixin:
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
-            async for line in stream_with_retry(
-                payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=propagate_http_errors,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                request_transport=_REQUEST_TRANSPORT_HTTP,
-                rewritten_file_account_id=rewritten_file_account_id,
-                file_account_resolution_complete=True,
-                upstream_stream_transport_override=force_upstream_stream_transport,
-                client_ip=client_ip,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            ):
-                yield line
+            async with _owned_response_iterator(
+                stream_with_retry(
+                    payload,
+                    headers,
+                    codex_session_affinity=codex_session_affinity,
+                    propagate_http_errors=propagate_http_errors,
+                    openai_cache_affinity=openai_cache_affinity,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    suppress_text_done_events=suppress_text_done_events,
+                    request_transport=_REQUEST_TRANSPORT_HTTP,
+                    rewritten_file_account_id=rewritten_file_account_id,
+                    file_account_resolution_complete=True,
+                    upstream_stream_transport_override=force_upstream_stream_transport,
+                    client_ip=client_ip,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                )
+            ) as owned_stream:
+                async for line in owned_stream:
+                    yield line
             return
 
         request_scope_id = ensure_request_scope_id()
@@ -1099,37 +1103,40 @@ class _HTTPBridgeStreamingMixin:
         bridge_attempt_started_at = clock_for(self).monotonic()
         try:
             try:
-                async for line in self._stream_via_http_bridge(
-                    payload,
-                    headers,
-                    codex_session_affinity=codex_session_affinity,
-                    propagate_http_errors=propagate_http_errors,
-                    openai_cache_affinity=openai_cache_affinity,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    suppress_text_done_events=suppress_text_done_events,
-                    idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-                    codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-                    max_sessions=runtime_config.max_sessions,
-                    queue_limit=runtime_config.queue_limit,
-                    prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-                    downstream_turn_state=downstream_turn_state,
-                    forwarded_request=forwarded_request,
-                    forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                    forwarded_legacy_signature=forwarded_legacy_signature,
-                    proxy_api_authorization=proxy_api_authorization,
-                    forwarded_affinity_kind=forwarded_affinity_kind,
-                    forwarded_affinity_key=forwarded_affinity_key,
-                    rewritten_file_account_id=rewritten_file_account_id,
-                    client_ip=client_ip,
-                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                    capacity_startup_wait_event=capacity_startup_wait_event,
-                    capacity_startup_ready_event=capacity_startup_ready_event,
-                    deferred_account_backoff_tracker=deferred_account_backoff_tracker,
-                    bridge_payload=bridge_payload,
-                ):
-                    bridge_yielded_any = True
-                    yield line
+                async with _owned_response_iterator(
+                    self._stream_via_http_bridge(
+                        payload,
+                        headers,
+                        codex_session_affinity=codex_session_affinity,
+                        propagate_http_errors=propagate_http_errors,
+                        openai_cache_affinity=openai_cache_affinity,
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        suppress_text_done_events=suppress_text_done_events,
+                        idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+                        codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+                        max_sessions=runtime_config.max_sessions,
+                        queue_limit=runtime_config.queue_limit,
+                        prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+                        downstream_turn_state=downstream_turn_state,
+                        forwarded_request=forwarded_request,
+                        forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                        forwarded_legacy_signature=forwarded_legacy_signature,
+                        proxy_api_authorization=proxy_api_authorization,
+                        forwarded_affinity_kind=forwarded_affinity_kind,
+                        forwarded_affinity_key=forwarded_affinity_key,
+                        rewritten_file_account_id=rewritten_file_account_id,
+                        client_ip=client_ip,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        capacity_startup_wait_event=capacity_startup_wait_event,
+                        capacity_startup_ready_event=capacity_startup_ready_event,
+                        deferred_account_backoff_tracker=deferred_account_backoff_tracker,
+                        bridge_payload=bridge_payload,
+                    )
+                ) as owned_stream:
+                    async for line in owned_stream:
+                        bridge_yielded_any = True
+                        yield line
             except ProxyResponseError as exc:
                 # A transient failure to establish the bridge's upstream
                 # websocket session must not fail the turn while the plain
@@ -1257,23 +1264,26 @@ class _HTTPBridgeStreamingMixin:
             request_id,
         )
         stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
-        async for line in stream_with_retry(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            request_transport=_REQUEST_TRANSPORT_HTTP,
-            rewritten_file_account_id=rewritten_file_account_id,
-            file_account_resolution_complete=True,
-            upstream_stream_transport_override="http",
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        ):
-            yield line
+        async with _owned_response_iterator(
+            stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                file_account_resolution_complete=True,
+                upstream_stream_transport_override="http",
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            )
+        ) as owned_stream:
+            async for line in owned_stream:
+                yield line
 
     async def _stream_via_http_bridge_impl(
         self: Any,
@@ -2621,20 +2631,23 @@ class _HTTPBridgeStreamingMixin:
             )
             forwarded_any = False
             try:
-                async for line in self._forward_http_bridge_request_to_owner(
-                    owner_forward=session_or_forward,
-                    payload=effective_payload,
-                    headers=session_creation_headers,
-                    api_key_reservation=api_key_reservation,
-                    codex_session_affinity=codex_session_affinity,
-                    downstream_turn_state=downstream_turn_state,
-                    file_owner_account_id=rewritten_file_account_id,
-                    request_started_at=request_state.started_at,
-                    proxy_api_authorization=proxy_api_authorization,
-                    client_ip=client_ip,
-                ):
-                    forwarded_any = True
-                    yield line
+                async with _owned_response_iterator(
+                    self._forward_http_bridge_request_to_owner(
+                        owner_forward=session_or_forward,
+                        payload=effective_payload,
+                        headers=session_creation_headers,
+                        api_key_reservation=api_key_reservation,
+                        codex_session_affinity=codex_session_affinity,
+                        downstream_turn_state=downstream_turn_state,
+                        file_owner_account_id=rewritten_file_account_id,
+                        request_started_at=request_state.started_at,
+                        proxy_api_authorization=proxy_api_authorization,
+                        client_ip=client_ip,
+                    )
+                ) as owner_stream:
+                    async for line in owner_stream:
+                        forwarded_any = True
+                        yield line
                 return
             except ProxyResponseError as exc:
                 if not _owner_forward_failure_allows_local_recovery(exc):

@@ -468,6 +468,10 @@ class _ApiKeyUsageMixin:
                     reservation_released=reservation_released,
                 ) from exc
             finally:
+                # This transfers cleanup ownership after the joined persistence
+                # attempts, not proof that either write succeeded. A forwarded
+                # origin must not release or replay completed upstream work;
+                # reservation_released still reports the truthful DB outcome.
                 _signal_propagated_responses_service_cleanup_ready()
 
     async def settle_image_api_key_usage(

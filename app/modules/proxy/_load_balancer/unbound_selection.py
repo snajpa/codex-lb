@@ -186,6 +186,14 @@ async def run_unbound_selection_path(
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
             )
+            if lease_kind == "stream":
+                response_create_states = _filter_states_for_account_caps(
+                    selection_states,
+                    lease_kind="response_create",
+                    caps=caps,
+                    stream_reserve_slots=0,
+                )
+                selection_states = response_create_states or selection_states
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,

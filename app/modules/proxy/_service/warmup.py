@@ -17,7 +17,13 @@ from app.core.auth.refresh import (
     is_transient_refresh_contention,
     refresh_contention_kind,
 )
-from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    UpstreamProxyRouteTrace,
+    filter_inbound_headers,
+    pop_compact_timeout_overrides,
+    push_compact_timeout_overrides,
+)
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
 from app.core.config.settings import get_settings
@@ -27,6 +33,7 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import UpstreamProxyRouteError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
@@ -327,6 +334,8 @@ class _WarmupMixin:
         output_tokens: int | None = None
         cached_input_tokens: int | None = None
         reasoning_tokens: int | None = None
+        actual_service_tier: str | None = None
+        completed_response: CompactResponsePayload | None = None
         reservation: ApiKeyUsageReservationData | None = None
         upstream_proxy_route_mode: str | None = None
         upstream_proxy_pool_id: str | None = None
@@ -335,12 +344,37 @@ class _WarmupMixin:
         upstream_proxy_fail_closed_reason: str | None = None
         proxy = cast(_WarmupServiceProtocol, self)
 
+        settings = with_dashboard_overrides(get_settings())
+        deadline = started_at + settings.compact_request_budget_seconds
+
+        def retain_completed_response(response: CompactResponsePayload) -> None:
+            nonlocal completed_response, request_id, input_tokens, output_tokens
+            nonlocal cached_input_tokens, reasoning_tokens, actual_service_tier
+            completed_response = response
+            request_id = response.id or request_id
+            usage = response.usage
+            input_tokens = usage.input_tokens if usage else None
+            output_tokens = usage.output_tokens if usage else None
+            cached_input_tokens = (
+                usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
+            )
+            reasoning_tokens = (
+                usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+            )
+            tier = (response.model_extra or {}).get("service_tier")
+            actual_service_tier = tier if isinstance(tier, str) else None
+
         try:
-            refresh_timeout = max(1.0, float(with_dashboard_overrides(get_settings()).upstream_connect_timeout_seconds))
+            refresh_timeout = min(
+                settings.compact_request_budget_seconds, max(1.0, float(settings.upstream_connect_timeout_seconds))
+            )
             live_account = await proxy._ensure_fresh_with_budget(live_account, timeout_seconds=refresh_timeout)
             access_token = proxy._encryptor.decrypt(live_account.access_token_encrypted)
             account_header_id = _header_account_id(live_account.chatgpt_account_id)
-            route = await proxy._resolve_upstream_route_for_account(live_account, operation="warmup")
+            route = await asyncio.wait_for(
+                proxy._resolve_upstream_route_for_account(live_account, operation="warmup"),
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
             if route is not None:
                 upstream_proxy_route_mode = route.mode
                 upstream_proxy_pool_id = route.pool_id
@@ -358,19 +392,32 @@ class _WarmupMixin:
                 prohibit_fast_mode=prohibit_fast_mode,
                 request_id=request_id,
             )
-            response = await _call_with_supported_optional_kwargs(
-                _service_core_compact_responses(),
-                payload,
-                upstream_headers,
-                access_token,
-                account_header_id,
-                optional_kwargs={
-                    "route": route,
-                    "allow_direct_egress": route is None,
-                    "route_trace": route_trace,
-                    "chatgpt_account_id": account_header_id,
-                },
+            remaining_budget = max(0.001, deadline - time.monotonic())
+            timeout_token = push_compact_timeout_overrides(
+                connect_timeout_seconds=remaining_budget,
+                total_timeout_seconds=remaining_budget,
             )
+            try:
+                response = await asyncio.wait_for(
+                    _call_with_supported_optional_kwargs(
+                        _service_core_compact_responses(),
+                        payload,
+                        upstream_headers,
+                        access_token,
+                        account_header_id,
+                        optional_kwargs={
+                            "route": route,
+                            "allow_direct_egress": route is None,
+                            "route_trace": route_trace,
+                            "chatgpt_account_id": account_header_id,
+                            "on_response_completed": retain_completed_response,
+                        },
+                    ),
+                    timeout=remaining_budget,
+                )
+            finally:
+                pop_compact_timeout_overrides(timeout_token)
+            retain_completed_response(response)
             if route_trace.mode is not None:
                 upstream_proxy_route_mode = route_trace.mode
                 upstream_proxy_pool_id = route_trace.pool_id
@@ -378,16 +425,6 @@ class _WarmupMixin:
                 upstream_proxy_fallback_used = route_trace.fallback_used
             await proxy._load_balancer.record_success(live_account)
             status = "success"
-            request_id = response.id or request_id
-            usage = response.usage
-            input_tokens = usage.input_tokens if usage else None
-            output_tokens = usage.output_tokens if usage else None
-            cached_input_tokens = (
-                usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
-            )
-            reasoning_tokens = (
-                usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
-            )
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(live_account, exc.code)
@@ -425,7 +462,8 @@ class _WarmupMixin:
             error_code = "upstream_proxy_unavailable"
             error_message = str(exc) or "Warmup upstream proxy route is unavailable"
         except ProxyResponseError as exc:
-            await proxy._handle_proxy_error(live_account, exc)
+            if completed_response is None:
+                await proxy._handle_proxy_error(live_account, exc)
             error = _parse_openai_error(exc.payload)
             error_code = _normalize_error_code(
                 error.code if error else None,
@@ -441,37 +479,49 @@ class _WarmupMixin:
         except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
+        except asyncio.CancelledError:
+            error_code = "request_cancelled"
+            error_message = "Warmup compact request cancelled"
+            raise
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"
         finally:
-            try:
-                await proxy._write_request_log(
-                    account_id=account.id,
-                    api_key=api_key,
-                    request_id=request_id,
-                    model=warmup_model,
-                    latency_ms=int((time.monotonic() - started_at) * 1000),
-                    status=status,
-                    error_code=error_code,
-                    error_message=error_message,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    transport=_REQUEST_TRANSPORT_HTTP,
-                    request_kind="warmup",
-                    upstream_proxy_route_mode=upstream_proxy_route_mode,
-                    upstream_proxy_pool_id=upstream_proxy_pool_id,
-                    upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
-                    upstream_proxy_fallback_used=upstream_proxy_fallback_used,
-                    upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
-                    useragent=useragent,
-                    useragent_group=useragent_group,
-                    conversation_id=conversation_id,
-                )
-            finally:
-                await proxy._release_websocket_reservation(reservation)
+
+            async def persist_and_release() -> None:
+                try:
+                    await proxy._write_request_log(
+                        account_id=account.id,
+                        api_key=api_key,
+                        request_id=request_id,
+                        model=warmup_model,
+                        latency_ms=int((time.monotonic() - started_at) * 1000),
+                        status=status,
+                        error_code=error_code,
+                        error_message=error_message,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        service_tier=actual_service_tier,
+                        actual_service_tier=actual_service_tier,
+                        transport=_REQUEST_TRANSPORT_HTTP,
+                        request_kind="warmup",
+                        upstream_proxy_route_mode=upstream_proxy_route_mode,
+                        upstream_proxy_pool_id=upstream_proxy_pool_id,
+                        upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
+                        upstream_proxy_fallback_used=upstream_proxy_fallback_used,
+                        upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
+                        conversation_id=conversation_id,
+                    )
+                finally:
+                    await proxy._release_websocket_reservation(reservation)
+
+            cancellation = await _await_cleanup_deferring_cancellation(persist_and_release())
+            if cancellation is not None:
+                raise cancellation
 
         if status == "success":
             return _WarmupSubmitResult(success=True, request_id=request_id)

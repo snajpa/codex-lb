@@ -29,10 +29,21 @@ impl StreamEvent<'_> {
     /// These response terminals end both SDK and native HTTP streams.
     /// Bare errors still require the caller's normalization policy.
     pub fn completes_http_stream(&self) -> bool {
-        matches!(
+        if !matches!(
             self.event_type.as_deref(),
             Some("response.completed" | "response.failed" | "response.incomplete")
-        )
+        ) {
+            return false;
+        }
+        // A terminal label alone is not proof of a valid response. This runs
+        // only for terminals; ordinary delta traffic keeps its cheap path.
+        let data = data_text(&self.text);
+        let Ok(fields) = serde_json::from_str::<BTreeMap<String, &RawValue>>(&data) else {
+            return false;
+        };
+        fields
+            .get("response")
+            .is_some_and(|response| response.get().starts_with('{'))
     }
 }
 
@@ -44,8 +55,8 @@ struct Payload<'a> {
     error: Option<&'a RawValue>,
 }
 
-/// Preserve Python's alias and canonical-frame classification, including its
-/// fast path. Error conversion still needs Python's request context.
+/// Classify the JSON payload, never a potentially misleading SSE header.
+/// Error conversion still needs Python's request context.
 pub fn interpret(block: &str) -> StreamEvent<'_> {
     let Ok(text) = normalize_aliases(block) else {
         return StreamEvent {
@@ -54,20 +65,6 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
             python_normalization: true,
         };
     };
-    // Mirror Python's literal-key fast path, including escaped error keys.
-    // Noncanonical frames still decode keys before selecting the error handoff.
-    if let Some(kind) = canonical_type(&text)
-        && kind != "error"
-        && alias(kind).is_none()
-        && !text.contains("\"error\"")
-    {
-        let event_type = Some(kind.to_owned());
-        return StreamEvent {
-            text,
-            event_type,
-            python_normalization: false,
-        };
-    }
     let data = data_text(&text);
     let payload = parse_payload(&data);
     let event_type = payload
@@ -257,14 +254,6 @@ fn data_text(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn canonical_type(block: &str) -> Option<&str> {
-    let body = block.strip_prefix("event: ")?;
-    let (kind, data) = body.split_once("\ndata: {")?;
-    let data = data.strip_suffix("\n\n")?;
-    (!kind.is_empty() && !kind.contains(['\r', '\n']) && !data.contains(['\r', '\n']))
-        .then_some(kind)
 }
 
 fn normalize_aliases(block: &str) -> Result<Cow<'_, str>, ()> {

@@ -27,8 +27,6 @@ import {
   formatSlug,
 } from "@/utils/formatters";
 
-const ACCOUNT_LIST_VISIBLE_ROWS = 8;
-const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
 const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 8rem";
 
 type AccountListProps = {
@@ -337,8 +335,7 @@ export function AccountList({
       className="overflow-x-auto rounded-lg border bg-card"
     >
       <div
-        className="min-w-[76rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        style={{ maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
+        className="min-w-[76rem] divide-y"
       >
         <div
           className="sticky top-0 z-10 grid gap-3 border-b bg-card/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-card/85"

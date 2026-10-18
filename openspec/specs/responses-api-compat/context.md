@@ -34,10 +34,13 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - When operators configure a multi-instance bridge ring, deterministic owner enforcement now applies only to hard continuity keys such as `x-codex-turn-state` and explicit session headers. Prompt-cache-derived bridge keys remain stable for local reuse, but in gateway-safe mode a non-owner replica may tolerate that locality miss and create or reuse a local session instead of failing with `bridge_instance_mismatch`.
 - Codex-facing websocket routes now advertise `x-codex-turn-state` during websocket accept and honor client-provided turn-state on reconnect so routing can stay sticky at turn granularity even when the public websocket reconnects.
 - HTTP responses routes now also return `x-codex-turn-state` headers so clients that persist response headers can promote later HTTP requests from prompt-cache affinity to stronger Codex-session continuity.
-- `/v1/responses/compact` keeps a final-JSON contract and preserves the raw upstream `/codex/responses/compact` payload shape as the canonical next context window instead of rewriting it through buffered `/codex/responses` streaming.
+- Both compact JSON endpoints return the upstream native context window. Subscription-backed compact requests adapt to the native Responses-v2 terminal-trigger protocol; its full input, tools, reasoning effort and parallel policy are retained. The Codex trigger SSE adapter also retains the complete terminal window, not only its capsule.
 - Compact transport failures fail closed with respect to semantics: no surrogate `/codex/responses` fallback and no local compact-window reconstruction.
 - Compact transport may use bounded same-contract retries only for safe pre-body transport failures and `401 -> refresh -> retry`.
-- `/v1/responses/compact` is supported only when the upstream implements it.
+- Native compaction requires a real nonempty encrypted capsule. A plaintext summary is not a capsule; multiple or malformed capsules fail as invalid_compaction_response. Capsule validation establishes structure, not cryptographic authenticity or upstream replay acceptance.
+- The default compact operation budget is 600 seconds. Native transport receives the actual remaining budget; cancellation joins admission release and quota settlement without inventing a shorter upstream deadline.
+- Model metadata advertises native_compaction_protocol=responses_v2 only for subscription-backed models. Standard compact API clients may keep their standard request fields; optional discovery is not a shared models.json schema change.
+- For example, a compact request with a large tool-result history, reasoning effort high and a function tool catalog reaches the native compactor intact. A returned user message plus encrypted capsule is retained in that order on JSON and Codex trigger SSE surfaces. Actual ingress limits and upstream context errors still apply.
 - `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
 - Codex-native direct websocket `/backend-api/codex/responses` treats upstream `previous_response_id` as an ephemeral anchor. If that anchor goes stale, the proxy masks raw upstream details and emits the sanitized canonical `previous_response_not_found` classifier so compatible Codex clients can retry with full local history and no `previous_response_id`. The upstream Codex socket has emitted this condition both with the canonical code and as a parameterless `invalid_request_error` carrying ``Invalid `previous_response_id`.``; both shapes use the same recovery policy.
 - Upstream Responses WebSockets use transport ping/pong control frames to detect a black-holed connection without confusing valid application-event silence with an idle turn. Direct and routed connections reuse `proxy_downstream_websocket_idle_timeout_seconds` for this zero-config liveness budget.
@@ -46,6 +49,38 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - HTTP bridge settlement ownership is explicit: `closed` rejects new work but does not imply that a submitter owns existing siblings. Only a liveness-failed send claims whole-deque settlement under the lifecycle lock; otherwise the reader remains responsible for settling pending requests when the transport dies.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
+
+## Native compaction lifecycle
+
+The complete validated native window is context, not a summary we reconstruct.
+Legacy text markers must not delete user or tool history when a returned window
+is used for either re-compaction or an ordinary continuation. Retained opaque
+extension items are forwarded intact; only string-valued item types participate
+in recognized file/tool ownership classifications.
+
+For example, a returned window can contain a marker-matching user message, an
+opaque extension with `type: ["future"]`, and one genuine nonempty encrypted
+capsule. Both the next compact call and the ordinary Responses continuation keep
+that window in order. File-owner inspection ignores the unrecognized type rather
+than hashing an array. Structural capsule validation cannot prove decryption or
+provider replay acceptance.
+
+Validated completion and actual usage/tier are handed to the request owner before
+lease, health, response or client/session teardown can be cancelled. Known completed
+work is settled/logged once and is not treated as unseen work eligible for replay.
+Compaction and warmup log insertions are joined; ordinary stream logging retains
+its existing lifetime. A persistence failure remains a failure, not evidence that
+a reservation was finalized.
+
+The Python SOCKS fallback separates JSON body parsing from owned response release
+so completion handoff precedes close. Before response ownership transfers, the
+request still owns its temporary session/connector and joins close on failure,
+caller cancellation or timeout. Warmup and automation retain known completion
+across teardown; response-head waiting is bounded by the remaining compact budget.
+
+These mechanisms are exercised through real loopback TCP/native-worker, SOCKS,
+public API and isolated database consumers, including negative controls. They do
+not constitute live authenticated provider qualification or production delivery.
 
 ## Fast Mode and Service Tiers
 

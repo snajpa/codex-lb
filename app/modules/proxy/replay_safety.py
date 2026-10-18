@@ -361,9 +361,9 @@ def responses_input_suffix_retains_prior_output(
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not pending_suffix_calls:
                 return False
-            if pending_suffix_calls[0] != (call_type, call_id):
+            if (call_type, call_id) not in pending_suffix_calls:
                 return False
-            pending_suffix_calls.popleft()
+            pending_suffix_calls.remove((call_type, call_id))
             continue
         if item_type in (None, "message") and item.get("role") == "assistant":
             if pending_suffix_calls or not _is_retained_response_message(item):
@@ -422,25 +422,39 @@ def responses_input_suffix_matches_pending_tool_calls(
         and _fresh_developer_interleave_is_bounded(suffix, index=1)
     ):
         suffix = [suffix[0], suffix[2]]
-    if not all(
-        isinstance(item, dict)
-        and isinstance(item.get("type"), str)
-        and item.get("type") in (_TOOL_CALL_TYPES | _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.keys())
-        for item in suffix
-    ):
-        return False
     if not responses_input_items_are_self_contained_fresh_replay(suffix):
         return False
     suffix_calls: dict[str, str] = {}
     suffix_outputs: dict[str, str] = {}
+    expected = dict(pending_tool_calls)
+    fresh_input_seen = False
     for item in cast(list[dict[str, JsonValue]], suffix):
-        item_type = cast(str, item["type"])
-        call_id = cast(str, item["call_id"])
+        item_type = item.get("type")
+        if item_type in (None, "message") and item.get("role") == "user":
+            if (
+                suffix_calls != expected
+                or suffix_outputs != expected
+                or not _is_fresh_followup_input(item)
+                or _contains_account_scoped_input_state(item)
+            ):
+                return False
+            fresh_input_seen = True
+            continue
+        if fresh_input_seen:
+            return False
+        if item_type in (None, "message") and item.get("role") == "assistant":
+            if not _is_retained_response_message(item) or _contains_account_scoped_input_state(item):
+                return False
+            continue
+        if not isinstance(item_type, str):
+            return False
+        call_id = cast(str, item.get("call_id"))
         if item_type in _TOOL_CALL_TYPES:
             suffix_calls[call_id] = item_type
-        else:
+        elif item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE:
             suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
-    expected = dict(pending_tool_calls)
+        else:
+            return False
     return suffix_calls == expected and suffix_outputs == expected
 
 
@@ -509,9 +523,9 @@ def _direct_tool_call_prefix_state(
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not pending_calls:
                 return None
-            if pending_calls[0] != (call_type, call_id):
+            if (call_type, call_id) not in pending_calls:
                 return None
-            pending_calls.popleft()
+            pending_calls.remove((call_type, call_id))
             if not pending_calls:
                 pending_window_developer_seen = False
                 pending_window_held_parallel_calls = False

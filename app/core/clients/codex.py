@@ -23,12 +23,14 @@ from app.core.clients.native_egress import (
     NativeWebSocketRequest,
     discover_native_egress_client,
 )
+from app.core.clients.sse_body import iter_sse_body_chunks
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     is_pre_dispatch_connection_failure,
     is_process_network_failure,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy", "proxy_headers"})
 _TLS_TARGET_SCHEMES = frozenset({"https", "wss"})
@@ -148,7 +150,7 @@ class _SessionOwnedContent:
         self._session = session
 
     def iter_chunked(self, size: int) -> Any:
-        return self._iter_and_close(self._response.content.iter_chunked(size))
+        return self._iter_and_close(iter_sse_body_chunks(self._response.content, size))
 
     async def _iter_and_close(self, iterator: Any) -> Any:
         try:
@@ -174,27 +176,31 @@ class _SessionOwnedResponse:
         finally:
             await self._session.close()
 
+    async def _read_body(self) -> bytes:
+        result = self._response.read()
+        if asyncio.iscoroutine(result):
+            result = await result
+        if isinstance(result, bytes):
+            return result
+        if isinstance(result, str):
+            return result.encode()
+        return b""
+
     async def read(self) -> bytes:
         try:
-            result = self._response.read()
-            if asyncio.iscoroutine(result):
-                result = await result
-            if isinstance(result, bytes):
-                return result
-            if isinstance(result, str):
-                return result.encode()
-            return b""
+            return await self._read_body()
         finally:
             await self.release()
 
     async def text(self) -> str:
         return (await self.read()).decode("utf-8", errors="replace")
 
-    async def json(self, *args: Any, **kwargs: Any) -> Any:
+    async def json(self, *args: Any, release_response: bool = True, **kwargs: Any) -> Any:
         del args, kwargs
-        import json
-
-        return json.loads(await self.read())
+        # Compact owns release until its validated completion has been handed off.
+        # Other consumers keep the existing read-and-release contract.
+        body = await self.read() if release_response else await self._read_body()
+        return json.loads(body)
 
 
 class _SessionOwnedWebSocketContext:
@@ -499,6 +505,7 @@ async def _request_via_socks_proxy(
         trust_env=False,
         skip_auto_headers=_CODEX_SKIP_AUTO_IDENTITY_HEADERS,
     )
+    session_owned = True
     try:
         try:
             response = await session.request(method, url, **kwargs)
@@ -521,13 +528,14 @@ async def _request_via_socks_proxy(
                     failure_phase="body_read",
                     retryable_same_contract=False,
                 ) from None
-        return _SessionOwnedResponse(response, session)
-    except Exception:
-        await session.close()
-        raise
+        owned_response = _SessionOwnedResponse(response, session)
+        session_owned = False
+        return owned_response
     finally:
-        if buffer_response:
-            await session.close()
+        if session_owned:
+            cancellation = await _await_cleanup_deferring_cancellation(session.close())
+            if cancellation is not None:
+                raise cancellation
 
 
 async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **kwargs: Any) -> tuple[Any, Any]:

@@ -58,9 +58,11 @@ from collections.abc import AsyncIterator, Mapping
 from fastapi.responses import StreamingResponse
 from starlette.types import Message, Receive, Scope, Send
 
+from app.core.clock import scheduler_for
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, stream_terminal_delivery_total
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +222,19 @@ class DeliveryTracedStreamingResponse(StreamingResponse):
             exc_name = type(exc).__name__
             raise
         finally:
-            self._finish(exc_name=exc_name, cancelled=cancelled)
+            try:
+                # A cancelled send leaves an async body suspended at yield.
+                # Close it before returning so its owned service finalizers run.
+                close = getattr(self.body_iterator, "aclose", None)
+                if close is not None:
+                    cancellation = await _await_cleanup_deferring_cancellation(
+                        close(), scheduler=scheduler_for(self.body_iterator)
+                    )
+                    if cancellation is not None and not cancelled and exc_name is None:
+                        cancelled = True
+                        raise cancellation
+            finally:
+                self._finish(exc_name=exc_name, cancelled=cancelled)
 
     def _classify(self, *, exc_name: str | None, cancelled: bool) -> str:
         if self._terminal_type is not None:

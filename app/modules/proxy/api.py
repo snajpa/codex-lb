@@ -7,7 +7,7 @@ import math
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from json import JSONDecodeError
@@ -141,7 +141,12 @@ from app.core.openai.images import (
     V1ImagesEditsForm,
     V1ImagesGenerationsRequest,
 )
-from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
+from app.core.openai.model_registry import (
+    MODEL_SOURCE_KIND_SUBSCRIPTION,
+    UpstreamModel,
+    get_model_registry,
+    is_public_model,
+)
 from app.core.openai.models import (
     CompactResponsePayload,
     CompactResponseResult,
@@ -1733,8 +1738,16 @@ async def v1_usage(
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
         hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
+        aggregate_limits, unquantified_windows = (
+            await _build_aggregate_credit_limits(
+                session,
+                assigned_account_ids=api_key.assigned_account_ids,
+                account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
+            )
+            if "upstream_limits" in usage_sections and not hide_upstream_limits
+            else ({}, [])
+        )
         account_pool_usage = (
             await _build_account_pool_usage(
                 session,
@@ -1758,6 +1771,7 @@ async def v1_usage(
         total_cost_usd=usage.total_cost_usd,
         limits=own_limits or upstream_limits,
         upstream_limits=upstream_limits,
+        upstream_limits_unquantified_windows=unquantified_windows,
         account_pool_usage=account_pool_usage,
     )
 
@@ -2181,6 +2195,8 @@ async def _build_account_pool_usage(
     return AccountPoolUsageResponse(
         primary=data.remaining_percent_primary,
         secondary=data.remaining_percent_secondary,
+        unquantified_account_count_primary=data.unquantified_account_count_primary,
+        unquantified_account_count_secondary=data.unquantified_account_count_secondary,
     )
 
 
@@ -2469,11 +2485,19 @@ def _attach_codex_usage_reset_credits(
     return replace(payload, rate_limit_reset_credits=reset_credits)
 
 
-async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
+async def _build_aggregate_credit_limits(
+    session: AsyncSession,
+    *,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool,
+) -> tuple[dict[str, V1UsageLimitResponse], list[str]]:
+    if account_assignment_scope_enabled and not assigned_account_ids:
+        return {}, []
     usage_repository = UsageRepository(session)
-    primary_latest = await usage_repository.latest_by_account(window="primary")
-    secondary_latest = await usage_repository.latest_by_account(window="secondary")
-    monthly_latest = await usage_repository.latest_by_account(window="monthly")
+    scoped_ids = assigned_account_ids if account_assignment_scope_enabled else None
+    primary_latest = await usage_repository.latest_by_account(window="primary", account_ids=scoped_ids)
+    secondary_latest = await usage_repository.latest_by_account(window="secondary", account_ids=scoped_ids)
+    monthly_latest = await usage_repository.latest_by_account(window="monthly", account_ids=scoped_ids)
 
     primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
@@ -2486,17 +2510,18 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         | {row.account_id for row in monthly_rows}
     )
     if not account_ids:
-        return {}
+        return {}, []
 
     account_map = {account.id: account for account in await _load_accounts_by_id(session, account_ids)}
     if not account_map:
-        return {}
+        return {}, []
 
     active_account_ids = set(account_map)
     primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
     secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
     monthly_rows = [row for row in monthly_rows if row.account_id in active_account_ids]
     limits: dict[str, V1UsageLimitResponse] = {}
+    unquantified_windows: list[str] = []
 
     for window_key, rows, label in (
         ("primary", primary_rows, "5h"),
@@ -2506,6 +2531,8 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         if not rows:
             continue
         summary = usage_core.summarize_usage_window(rows, account_map, window_key)
+        if summary.unquantified_account_count:
+            unquantified_windows.append("30d" if window_key == "monthly" else label)
         max_value = max(0, int(round(summary.capacity_credits or 0.0)))
         if max_value <= 0:
             continue
@@ -2523,7 +2550,7 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
             source="aggregate",
         )
 
-    return limits
+    return limits, unquantified_windows
 
 
 async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> list[Account]:
@@ -4075,7 +4102,7 @@ def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue
         metadata = item.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier", "max_context_window"):
             if metadata.get(key) is None:
                 metadata.pop(key, None)
     return payload
@@ -4266,12 +4293,10 @@ async def _effective_context_window_overrides() -> Mapping[str, int]:
 
 
 def _resolved_context_window(model: UpstreamModel, overrides: Mapping[str, int]) -> int:
-    # An explicit operator context-window override is an assertion about the usable
-    # input budget, so it must also reach the generic OpenAI-compatible fields
-    # (`context_length`, `contextLength`, `capabilities.context_length`, and
-    # `metadata.input_context_window`). Generic clients read those rather than
-    # `metadata.context_window` and would otherwise cap themselves at the
-    # un-overridden upstream budget while Codex-native clients use the wider window.
+    # An operator working-window preference must reach the generic aliases
+    # (`context_length`, `contextLength`, and `capabilities.context_length`)
+    # as well as `metadata.context_window`. Explicit input ceilings are separate
+    # upstream declarations, preserved by `_to_model_metadata`.
     # The override is clamped to the upstream-declared `max_context_window` so it can
     # never advertise more input than the backend sanctions — the same clamp the Codex
     # client applies to `model_context_window` in config.toml. The clamp only applies
@@ -4297,6 +4322,13 @@ def _resolved_context_window(model: UpstreamModel, overrides: Mapping[str, int])
     ):
         return min(override, max_context_window)
     return override
+
+
+def _v1_max_context_window(model: UpstreamModel, *, context_window: int) -> int | None:
+    maximum = model.raw.get("max_context_window")
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+        return None
+    return max(context_window, maximum)
 
 
 def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
@@ -4359,11 +4391,22 @@ def _effective_source_codex_visibility(
 
 
 def _to_model_metadata(model: UpstreamModel, *, context_window: int) -> ModelMetadata:
+    input_context_window: int | None = None
+    for field_name in ("input_context_window", "max_input_tokens"):
+        value = model.raw.get(field_name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Invalid {field_name} in upstream model input limits")
+        if input_context_window is None or value < input_context_window:
+            input_context_window = value
     return ModelMetadata(
+        native_compaction_protocol="responses_v2" if model.source_kind == MODEL_SOURCE_KIND_SUBSCRIPTION else None,
         display_name=model.display_name,
         description=model.description,
         context_window=context_window,
-        input_context_window=context_window,
+        input_context_window=input_context_window,
+        max_context_window=_v1_max_context_window(model, context_window=context_window),
         max_output_tokens=_v1_max_output_tokens(model),
         input_modalities=list(model.input_modalities),
         supported_reasoning_levels=[
@@ -6347,26 +6390,26 @@ async def _stream_responses(
         try:
             compact_trigger_input = strip_terminal_compaction_trigger_input(payload)
             if compact_trigger_input is not None:
-                compact_payload_data = payload.model_dump(
-                    mode="json",
-                    include={
-                        "model",
-                        "instructions",
-                        "reasoning",
-                        "store",
-                        "service_tier",
-                        "prompt_cache_key",
-                    },
-                    exclude_none=True,
-                )
+                compact_fields = {
+                    "model",
+                    "instructions",
+                    "reasoning",
+                    "tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "store",
+                    "service_tier",
+                    "prompt_cache_key",
+                }
+                compact_payload_data = {
+                    name: value for name, value in payload.model_dump_for_forwarding().items() if name in compact_fields
+                }
                 if isinstance(payload.model_extra, dict):
                     prompt_cache_key_alias = payload.model_extra.get("promptCacheKey")
                     if isinstance(prompt_cache_key_alias, str) and "prompt_cache_key" not in compact_payload_data:
                         compact_payload_data["prompt_cache_key"] = prompt_cache_key_alias
-                # The main /responses route trims the terminal trigger before
-                # compaction so the compact budget and image elision see only
-                # the history to summarize. The upstream /compact contract
-                # still requires exactly one terminal trigger on the wire.
+                # Preserve the complete history and prefix declarations while
+                # adapting the terminal trigger to the compact request contract.
                 compact_payload_data["input"] = [
                     *compact_trigger_input,
                     {"type": "compaction_trigger"},
@@ -6376,9 +6419,8 @@ async def _stream_responses(
                 if payload.conversation is not None:
                     compact_payload_data["conversation"] = payload.conversation
                 compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
-                # Validate the exact compact wire payload before admission or
-                # reservation work so an untrimmable trigger is a client 400,
-                # not a late service exception that reaches the global 500.
+                # Validate the compact request shape before admission and
+                # reservation work.
                 compact_payload.to_payload()
         except ClientPayloadError as exc:
             error = openai_client_payload_error(exc)
@@ -6513,10 +6555,14 @@ async def _stream_responses(
                     )
                     return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
             else:
+                compact_window = _normalize_codex_remote_compaction_v2_result(
+                    compact_result, compact_result.model_dump(mode="json", exclude_none=True)
+                ).get("output")
                 stream = _synthetic_compaction_response_stream(
                     compact_item,
                     response_id=_compact_response_id(compact_result),
                     usage=compact_result.usage,
+                    output=compact_window if isinstance(compact_window, list) else None,
                 )
             return StreamingResponse(
                 stream,
@@ -6578,6 +6624,7 @@ async def _stream_responses(
         )
 
     stream = build_response_stream()
+    original_response_stream = stream
     startup_handoff_tasks: list[asyncio.Task[str]] = []
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
@@ -6699,8 +6746,11 @@ async def _stream_responses(
     # the service stream, including when the startup probe already completed.
     stream = _guard_responses_startup_handoff(
         stream,
+        scheduler=turn_scheduler,
         startup_task=startup_handoff_tasks[0] if startup_handoff_tasks else None,
-        streams_to_close=(service_stream,),
+        # Close outer drivers before the original service iterator. A wrapper
+        # suspended at yield need not close its source when it is closed.
+        streams_to_close=(original_response_stream, service_stream, stream),
         reservation_cleanup=reservation_cleanup,
         responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
         responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
@@ -7118,7 +7168,18 @@ def _normalize_codex_remote_compaction_v2_result(
     if compaction_item is None:
         return result_payload
     normalized = dict(result_payload)
-    normalized["output"] = [compaction_item]
+    output = result_payload.get("output")
+    if isinstance(output, list):
+        normalized["output"] = [
+            _normalize_compaction_output_item(item)
+            if is_json_mapping(item)
+            and isinstance(item.get("type"), str)
+            and item.get("type") in {"compaction", "compaction_summary"}
+            else item
+            for item in output
+        ]
+    else:
+        normalized["output"] = [compaction_item]
     return normalized
 
 
@@ -7188,14 +7249,21 @@ async def _synthetic_compaction_response_stream(
     *,
     response_id: str,
     usage: object | None,
+    output: list[JsonValue] | None = None,
 ) -> AsyncIterator[str]:
     item = dict(compact_item)
     item.setdefault("status", "completed")
+    window: list[JsonValue] = list(output) if output else [item]
+    output_index = next(
+        (index for index, entry in enumerate(window) if is_json_mapping(entry) and entry.get("type") == "compaction"),
+        0,
+    )
+    window[output_index] = item
     completed_response: dict[str, JsonValue] = {
         "id": response_id,
         "object": "response",
         "status": "completed",
-        "output": [item],
+        "output": window,
     }
     usage_mapping = _json_mapping_from_model_or_mapping(usage)
     if usage_mapping is not None:
@@ -7212,29 +7280,35 @@ async def _synthetic_compaction_response_stream(
             },
         }
     )
-    yield format_sse_event(
-        {
-            "type": "response.output_item.added",
-            "sequence_number": 1,
-            "output_index": 0,
-            "item": {
-                **item,
-                "status": "in_progress",
-            },
-        }
-    )
-    yield format_sse_event(
-        {
-            "type": "response.output_item.done",
-            "sequence_number": 2,
-            "output_index": 0,
-            "item": item,
-        }
-    )
+    sequence_number = 1
+    for index, entry in enumerate(window):
+        if not is_json_mapping(entry):
+            raise ValueError("Native compact output item must be an object")
+        added_item = dict(entry)
+        if index == output_index:
+            added_item["status"] = "in_progress"
+        yield format_sse_event(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": sequence_number,
+                "output_index": index,
+                "item": added_item,
+            }
+        )
+        sequence_number += 1
+        yield format_sse_event(
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence_number,
+                "output_index": index,
+                "item": dict(entry),
+            }
+        )
+        sequence_number += 1
     yield format_sse_event(
         {
             "type": "response.completed",
-            "sequence_number": 3,
+            "sequence_number": sequence_number,
             "response": completed_response,
         }
     )
@@ -8136,7 +8210,36 @@ def _record_stream_keepalive(surface: str) -> None:
         stream_keepalive_sent_total.labels(surface=surface).inc()
 
 
-async def _guard_responses_startup_handoff(
+@dataclass(slots=True)
+class _ResponsesStartupHandoff(AsyncIterator[str]):
+    stream: AsyncIterator[str]
+    cleanup: Callable[[], Coroutine[Any, Any, None]]
+    _scheduler: Scheduler
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    def __aiter__(self) -> _ResponsesStartupHandoff:
+        return self
+
+    async def __anext__(self) -> str:
+        if self._close_task is not None:
+            raise StopAsyncIteration
+        try:
+            return await self.stream.__anext__()
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        # Unlike an unstarted async generator, this owner always performs its
+        # cleanup. Every closer joins the same task before returning.
+        if self._close_task is None:
+            self._close_task = self._scheduler.create_task(self.cleanup(), name="responses-startup-handoff-close")
+        _, cancellation = await _shared_await_task_deferring_cancellation(self._close_task)
+        if cancellation is not None:
+            raise cancellation
+
+
+def _guard_responses_startup_handoff(
     stream: AsyncIterator[str],
     *,
     startup_task: asyncio.Task[str] | None,
@@ -8145,11 +8248,9 @@ async def _guard_responses_startup_handoff(
     responses_service_cleanup_ready_event: asyncio.Event,
     responses_owner_forward_dispatched_event: asyncio.Event,
     responses_owner_forward_rejected_event: asyncio.Event,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> AsyncIterator[str]:
-    try:
-        async for line in stream:
-            yield line
-    finally:
+    async def cleanup() -> None:
         with anyio.CancelScope(shield=True):
             release_candidate = startup_task is None
             if startup_task is not None:
@@ -8175,6 +8276,8 @@ async def _guard_responses_startup_handoff(
                 owner_forward_rejected_event=responses_owner_forward_rejected_event,
             ):
                 await reservation_cleanup.release(action="responses startup handoff")
+
+    return _ResponsesStartupHandoff(stream, cleanup, scheduler)
 
 
 async def _close_responses_stream_best_effort(
@@ -8233,10 +8336,16 @@ async def _stream_response_error_events(
             return
         await cleanup.release(action="responses stream cleanup")
 
+    terminal_event_seen = False
     try:
         async for line in stream:
+            payload = _parse_sse_payload(line)
+            if payload is not None and classify_event_type(payload) in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                terminal_event_seen = True
             yield line
     except ProxyResponseError as exc:
+        if terminal_event_seen:
+            raise
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
         # A refusal the proxy raised before any upstream frame was sent shares
         # its public code with the upstream transport failures below, but it is

@@ -271,7 +271,7 @@ class _RequestLogMixin:
             ),
             name=f"proxy-request-log-{request_id}",
         )
-        # Detach unconditionally: the row is observational (dashboards, usage
+        # Normal response rows are observational (dashboards, usage
         # aggregation) and nothing on the response path reads it back
         # synchronously — the one post-hoc consumer, the images model
         # rewrite, already retries while the row is missing. Awaiting the
@@ -350,6 +350,10 @@ class _RequestLogMixin:
             queued_wait_ms=queued_wait_ms,
             retried=upstream_retried,
         )
+        if request_kind in {"compaction", "warmup"}:
+            # Compact and warmup cleanup join the insert under cancellation protection.
+            # The tracking callback retains the observational failure policy.
+            await asyncio.gather(task, return_exceptions=True)
 
     async def drain_persistence_tasks(
         self,

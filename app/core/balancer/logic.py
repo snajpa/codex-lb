@@ -79,6 +79,7 @@ UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 ResetPreferenceWindow = Literal["primary", "secondary"]
 UNKNOWN_PLAN_FALLBACK = "free"
 CAPACITY_PLAN_ALIASES = {
+    "promax": "pro",
     "education": "edu",
     "k12": "edu",
     "guest": "free",
@@ -1448,7 +1449,8 @@ FailoverAction = Literal["failover_next", "retry_same_account", "surface"]
 # same-account backoff before the original rejection is surfaced. Module
 # constants on purpose -- the Settings ratchet is full and this is a transport
 # invariant, not an operator knob. Waits are 1 s, 2 s, 4 s (upstream
-# ``Retry-After`` is a floor), never above ``BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS``.
+# ``Retry-After`` is a floor). The cap bounds generated backoff only; upstream
+# cooldowns are bounded by the caller's remaining request budget.
 BURST_SAME_ACCOUNT_MAX_RETRIES = 3
 BURST_SAME_ACCOUNT_BASE_SECONDS = 1.0
 BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS = 10.0
@@ -1460,14 +1462,14 @@ BURST_SURFACE_RETRY_AFTER_SECONDS = 5
 def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds: float | None) -> float:
     """Deterministic wait before same-account burst retry ``retry_index`` (1-based).
 
-    ``min(MAX_WAIT, max(retry_after_seconds or 0, BASE * 2 ** (retry_index - 1)))``:
+    ``max(retry_after_seconds or 0, min(MAX_WAIT, BASE * 2 ** (retry_index - 1)))``:
     exponential from ``BURST_SAME_ACCOUNT_BASE_SECONDS`` with the upstream
     ``Retry-After`` (when present and positive) acting as a floor. No jitter, so
     the caller's timing seam (``scheduler.sleep``) fully owns the wait.
     """
     exponential = BURST_SAME_ACCOUNT_BASE_SECONDS * (2 ** (max(retry_index, 1) - 1))
     floor = float(retry_after_seconds) if retry_after_seconds is not None and retry_after_seconds > 0 else 0.0
-    return min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, max(floor, exponential))
+    return max(floor, min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, exponential))
 
 
 def failover_decision(

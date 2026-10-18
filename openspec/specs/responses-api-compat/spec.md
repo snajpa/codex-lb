@@ -1014,7 +1014,7 @@ and durable circuit state.
   is unowned
 
 ### Requirement: Long Codex websocket turns tolerate extended upstream silence
-The default compact request budget MUST be at least 180 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
+The default compact request budget MUST be 600 seconds, and the default upstream stream idle timeout MUST be at least 600 seconds, so long-running Codex turns can survive expensive compaction or tool execution without a local proxy watchdog ending the turn prematurely. Responses streams over both HTTP and WebSocket transports MUST use `http_responses_stream_request_budget_seconds` when it is configured; they MUST fall back to `proxy_request_budget_seconds` only when no stream-specific budget is available.
 
 `compact_request_budget_seconds`, `stream_idle_timeout_seconds`, `proxy_request_budget_seconds` and `http_responses_stream_request_budget_seconds` are dashboard-managed (`configuration-tiers`): each has a nullable `dashboard_settings` column of the same name whose non-NULL value MUST override the process environment value, which in turn overrides the code default. Consumers MUST read the effective value from the `SettingsCache` snapshot bound at the request or WebSocket entry point and MUST NOT query the database per request or per event. The environment variables remain as deprecated fallbacks and MUST NOT be copied into the column by the server; a client that echoes the effective values of a `GET /api/settings` response back through `PUT` stores them as explicit dashboard values (clients MUST send only the fields they intend to change). `GET /api/settings` MUST report any environment value the `Settings` model accepts, including one outside the bounds `PUT` enforces.
 
@@ -1022,7 +1022,7 @@ Background consumers derived from the stream budget (the quota warm-up claim lea
 
 #### Scenario: compact and stream watchdog defaults leave room for long turns
 - **WHEN** the service starts with default configuration
-- **THEN** `compact_request_budget_seconds` is at least 180 seconds
+- **THEN** `compact_request_budget_seconds` is 600 seconds
 - **AND** `stream_idle_timeout_seconds` is at least 600 seconds
 
 #### Scenario: WebSocket Responses stream uses the stream-specific request budget
@@ -1798,16 +1798,6 @@ The service SHALL accept built-in Responses tool definitions on `/backend-api/co
 #### Scenario: full Responses request includes built-in tools
 - **WHEN** a client sends `/backend-api/codex/responses` or `/v1/responses` with built-in Responses tools such as `image_generation`, `computer_use`, `computer_use_preview`, `file_search`, or `code_interpreter`
 - **THEN** the proxy forwards those tool objects upstream instead of returning a local `invalid_request_error`
-
-### Requirement: Compact requests drop tool-only fields
-The service SHALL remove `tools` and `tool_choice` from compact request payloads, and set `parallel_tool_calls` to `false`, before calling the upstream compact endpoint.
-
-#### Scenario: compact request reuses a full Responses payload shape
-
-- **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` with `tools`, `tool_choice`, or `parallel_tool_calls`
-- **THEN** the proxy drops `tools` and `tool_choice` before the upstream compact request
-- **AND** the proxy sends `parallel_tool_calls` as `false`
-- **AND** the compact request continues without a local or upstream `invalid_request_error` caused by `param="tools"`
 
 ### Requirement: Responses requests accept input_file content items with a file_id
 
@@ -3365,15 +3355,7 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
 
 ### Requirement: Codex compaction triggers are bridged into compact output
 
-When `POST /backend-api/codex/responses` receives a request whose top-level `input` array contains exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item. The internal compact request built for that flow MUST contain exactly one terminal `compaction_trigger` item on the compact wire, and the proxy MUST reject duplicate or non-terminal top-level `compaction_trigger` placement locally with HTTP 400 `invalid_request_error` before any upstream compact handling.
-
-The stream MUST emit `response.created`, `response.output_item.added`, `response.output_item.done`, and `response.completed` in that order with monotonically increasing sequence numbers. The added event MUST expose the selected compaction item as in progress. The done event and terminal completed response MUST carry the same terminal `compaction` item. When the selected encrypted upstream compaction item carries a valid `cmp_` ID or status, the synthetic stream MUST preserve those values with its `encrypted_content`; it MUST NOT generate or rewrite a replacement item ID. A malformed, empty, or non-`cmp_` ID MUST be omitted while the opaque encrypted content remains unchanged.
-
-Codex compact flows SHALL send the upstream compact request to `POST /backend-api/codex/responses` with `stream=true` and `store=false`, accept the upstream SSE response, and reconstruct one normalized compact response item from the terminal response lifecycle; they MUST NOT require the legacy `/backend-api/codex/responses/compact` upstream route to be available.
-
-For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL remain available as a compatibility endpoint with its subscription-backed compact routing contract, and SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A valid upstream `cmp_` compaction item `id` and any non-empty `status` MUST be preserved in that normalized output item. An empty, non-string, or non-`cmp_` ID MUST be omitted rather than rewritten; encrypted content MUST remain unchanged.
-
-OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement; when it receives duplicate top-level `compaction_trigger` items, codex-lb preserves the existing compatibility behavior and the forwarded compact input contains one terminal trigger.
+Codex terminal top-level triggers MUST invoke compact handling with one terminal wire trigger; malformed placement MUST be rejected locally. Trigger SSE and standalone compact JSON MUST preserve the complete native window, usage and one encrypted capsule. SSE MUST emit created, indexed added/done pairs, then completed with monotonic sequences. Valid capsule ID/status and opaque content MUST be preserved; invalid capsule IDs MUST be omitted. Upstream SHALL use Responses streaming.
 
 #### Scenario: terminal trigger emits a complete compact lifecycle
 
@@ -3381,7 +3363,7 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 - **THEN** the proxy strips the trigger and invokes compact handling
 - **AND** it emits created, added, done, and completed events in that order
 - **AND** their sequence numbers increase monotonically from zero
-- **AND** the done event and completed response contain the same single terminal compaction item
+- **AND** the done events and completed response preserve every returned native item in order, including exactly one encrypted capsule
 
 #### Scenario: terminal trigger becomes one compact-wire trigger
 
@@ -3412,22 +3394,16 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
   compact flow
 - **THEN** the proxy sends the compact request to
   `POST /backend-api/codex/responses` with `stream=true` and `store=false`
-- **AND** it accepts the upstream SSE response and reconstructs one normalized
-  compact response item from the terminal response lifecycle
+- **AND** it accepts upstream SSE and reconstructs the complete validated native
+  window from the terminal response lifecycle
 - **AND** it does not require the legacy `/backend-api/codex/responses/compact`
   upstream route to be available
 
-#### Scenario: Legacy message-shaped compact output does not get a rewritten item ID
+#### Scenario: Plaintext cannot manufacture encrypted compact output
 
-- **WHEN** the upstream compact response exposes the encrypted compact payload
-  as a legacy `message` item with a non-empty ID that does not begin with `cmp_`
-- **THEN** the proxy converts that item to `type="compaction"` and omits the
-  malformed ID
-- **AND** the proxy preserves the encrypted content unchanged
-- **AND** an existing ID that begins with `cmp_` is preserved byte-for-byte
-- **AND** the proxy does not synthesize a `cmp_msg_...` ID
-- **AND** ordinary message items outside the compact-output conversion remain
-  unchanged
+- **WHEN** upstream returns messages without a valid encrypted compaction capsule
+- **THEN** compact handling fails with invalid_compaction_response
+- **AND** no plaintext message is relabelled as encrypted compaction
 
 #### Scenario: Standalone Codex compact remains a compatibility endpoint
 
@@ -3440,9 +3416,9 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 #### Scenario: Codex-affinity standalone compact normalizes remote v2 output
 
 - **WHEN** a Codex-affinity `POST /backend-api/codex/responses/compact` request receives upstream output that contains historical message items and one compaction summary item
-- **THEN** the JSON response body contains exactly one `output` item for that compaction summary
+- **THEN** the JSON response preserves historical message items and the compaction summary in their original order
 - **AND** the normalized item preserves the compaction summary's valid `cmp_`-prefixed upstream ID and status
-- **AND** it does not expose historical message items as standalone compact output
+- **AND** it does not discard or rewrite the retained native history
 
 #### Scenario: OpenAI-compatible compact normalizes duplicate triggers
 
@@ -3697,7 +3673,7 @@ Request logs for direct Responses WebSocket turns MUST persist the connection-sc
 - **AND** the request log records `connection_request_kind` as `prewarm`
 
 ### Requirement: Codex compact requests are bounded by the proxy request budget
-When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget. That budget (the dashboard `compact_request_budget_seconds`) is the only total cap on the upstream compact call; there is no separate upstream compact timeout setting. The service MUST preserve Codex turn metadata `request_kind` in compact request logs so auto-compaction failures are distinguishable from normal user turns.
+When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget. That budget (the dashboard `compact_request_budget_seconds`) is the only total cap on the upstream compact call; there is no separate upstream compact timeout setting. The service MUST identify compact endpoint calls as request_kind compaction and preserve the supplied session identity, independently of Codex turn metadata.
 
 #### Scenario: auto-compaction cannot hang past the proxy budget
 - **GIVEN** a Codex compact request carries `x-codex-turn-metadata` with `request_kind: "compaction"`
@@ -4148,144 +4124,6 @@ top-level `instructions` unchanged.
 - **WHEN** an OpenAI-compatible client sends `input` containing
   `{"role": "system", "content": "sys"}` without a `type` field
 - **THEN** that item is hoisted into `instructions` as before
-
-### Requirement: Responses Lite follow-up transformations fail closed
-
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context and MUST fail closed with `responses_compact_input_too_large` when they cannot fit. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules. When already-observed inline image bytes alone make a required latest tool result too large, compact preparation MUST replace only those image bytes with an explicit textual omission marker rather than permanently poisoning the thread; this image-byte relaxation MUST NOT weaken fail-closed handling for oversized textual state.
-
-#### Scenario: Oversized compact input keeps the Lite prelude
-- **WHEN** compact input trimming is required for a Responses Lite request
-- **THEN** every required `additional_tools` item remains in the upstream input
-- **AND** typed and role-only system/developer state remains in the upstream input
-
-#### Scenario: Compact input keeps a latest tool pair that fits
-- **WHEN** compact trimming is required, the latest input item is a non-state, non-side-effecting tool call or tool output, and its complete pair fits with required anchors and trim markers
-- **THEN** the latest item remains in the upstream input
-- **AND** any matching call or output present in the supplied input is retained with it
-
-#### Scenario: Oversized non-state tool tail leaves room for trim markers
-- **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
-- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
-- **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
-- **AND** the marker does not claim omitted terminal context was preserved
-
-#### Scenario: Continuity-anchored latest tool output remains required
-- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest input item is a tool output without a matching call in the supplied input
-- **THEN** the output remains in the upstream input because its call belongs to the prior response
-- **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
-
-#### Scenario: Ordinary non-patch paired tail may be omitted
-- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest ordinary, non-`apply_patch` tool output has a matching call in supplied input
-- **THEN** compact trimming MAY omit the complete pair when it cannot fit
-- **AND** this allowance does not apply to an `apply_patch` call or output
-
-#### Scenario: Reused call ID from another tool variant does not satisfy continuity
-- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest tool
-  output reuses the `call_id` of an incompatible function/custom/apply-patch
-  call variant in supplied input
-- **THEN** the latest output remains required as continuity from the previous response
-- **AND** the incompatible supplied call is not retained as its pair
-
-#### Scenario: Oversized latest unmatched tool call fails closed
-- **WHEN** the latest compact input item is an unmatched tool call that cannot fit the compact wire budget
-- **THEN** the service returns `responses_compact_input_too_large` rather than representing the call with a compact-trim marker
-
-#### Scenario: Side-effecting tail remains required
-- **WHEN** the latest compact input item is an `apply_patch_call`, `apply_patch_call_output`, or a tool call or matching pair classified as side-effecting by the canonical tool-safety classifier
-- **THEN** the item and any matching counterpart remain required compact context
-- **AND** the service returns `responses_compact_input_too_large` rather than omitting the side-effecting patch record when they cannot fit
-
-#### Scenario: Reused call IDs keep only the required occurrence
-- **WHEN** an older tool call and a required state-tool call reuse the same call ID
-- **THEN** compact trimming retains the output matched to the required state-call occurrence
-- **AND** it does not retain an oversized historical output solely because its earlier call reused that ID
-
-#### Scenario: Exact-budget backtracking drops an optional tool pair together
-- **WHEN** optional tool context fits the approximate item budget but trim-marker framing exceeds the exact wire cap
-- **THEN** backtracking removes the optional call and its matching output as one group
-- **AND** it does not re-add either counterpart while preserving every required item
-
-#### Scenario: Oversized inline image does not poison terminal compaction
-- **WHEN** compact input exceeds the upstream limit because a required latest eligible tool output contains an inline data-URL image that the model already observed
-- **THEN** compact preparation retains the tool call and output identities
-- **AND** first uses lossless context trimming when that can fit the request
-- **AND** replaces only the inline image bytes with an explicit textual omission marker
-- **AND** replaces an eligible legacy Chat `image_url` content part as a whole
-  with a schema-valid text part before any generic string substitution
-- **AND** preserves the other textual parts of the tool output
-- **AND** accepted file-backed `input_file` references remain unchanged
-- **AND** hosted `computer_call_output` screenshots remain fail-closed until a
-  schema-valid compact placeholder is defined
-- **AND** non-image required content that cannot fit still returns
-  `responses_compact_input_too_large`
-
-### Requirement: Compact trimming preserves prioritised historical side effects
-
-The service MUST retain recognised historical side-effect tool calls as bounded
-priority context when an oversized compact input is trimmed. It MUST use the
-same side-effect classifier as downstream replay
-deduplication. This includes code-mode `exec` and `collaboration` wrapper calls
-as well as their lower-level tool spellings and recognised parallel batches.
-
-For each retained historical side effect, compact trimming MUST retain its
-matching call and output together. The service MUST reserve space for that
-complete pair before selecting optional ordinary head or tail context. Required
-state anchors and the current required item remain mandatory; if they leave no
-room for a historical pair, the service MAY drop that pair together and retain a
-trim marker instead.
-
-A recognised side-effect call without a non-empty `call_id` MUST NOT be
-retained as a historical side-effect anchor, because it cannot form a verified
-call/output pair.
-
-#### Scenario: Code-mode side effect survives an oversized compact input
-
-- **WHEN** an oversized compact input contains a historical custom `exec` or
-  `collaboration` call with its matching output outside required state context
-- **THEN** the trimmed upstream input retains both the call and its output when
-  the pair fits with required state
-- **AND** optional ordinary tail context is dropped before that pair
-
-#### Scenario: Historical side-effect pair cannot fit with required state
-
-- **WHEN** required state anchors and the current required item leave no room
-  for a historical side-effect call and its matching output
-- **THEN** compact trimming drops the entire historical pair
-- **AND** it does not retain only one member of that pair
-
-#### Scenario: Side-effect call lacks a usable pair key
-
-- **WHEN** an oversized compact input contains a recognised historical
-  side-effect call without a non-empty `call_id`
-- **THEN** compact trimming does not preserve that call as a side-effect anchor
-- **AND** it does not emit an unpaired historical side-effect call upstream
-
-#### Scenario: Final compact wire expansion is rejected locally
-
-- **WHEN** Unicode escaping, JSON array framing, or image inlining makes the final compact input exceed the upstream limit
-- **THEN** the service returns `responses_compact_input_too_large` before an upstream attempt
-- **AND** any API-key reservation is released
-- **AND** no upstream account is penalized
-
-#### Scenario: Terminal compaction trigger validates before admission
-
-- **WHEN** a streaming Responses request ends with `compaction_trigger` and its derived compact input cannot fit
-- **THEN** the service returns the same invalid-client-payload response before admission, reservation, account selection, or upstream compact work
-
-#### Scenario: Enforced non-Lite model rejects Lite input
-
-- **WHEN** API-key policy rewrites Lite-shaped input to a model whose catalog metadata disables Responses Lite
-- **THEN** the service rejects the request before any upstream HTTP or websocket attempt
-
-#### Scenario: Replayed code-mode side effects are emitted once
-
-- **WHEN** reconnect replay repeats the same code-mode `exec` or `collaboration` call identity
-- **THEN** the downstream client receives that side-effecting call only once
-
-#### Scenario: Distinct code-mode calls remain distinct
-
-- **WHEN** request history has different call IDs with identical code-mode source text and matching outputs
-- **THEN** every call and matching output remains in the forwarded history
 
 ### Requirement: Reasoning summaries omit blank HTML comment placeholders
 
@@ -10896,3 +10734,179 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Native compaction preserves its upstream request contract
+The service MUST preserve the requested reasoning effort and client-supplied tool definitions when adapting native compact requests to the upstream Responses-v2 compaction-trigger protocol. It MUST preserve tool ordering and unknown tool fields, and MUST NOT manufacture a local summary when native compaction fails.
+
+#### Scenario: Native compact request carries a foreground tool prefix
+- **WHEN** a native compact request includes reasoning effort and tool definitions
+- **THEN** the upstream Responses-v2 request retains those values and their ordering
+- **AND** its input ends with exactly one compaction trigger
+- **AND** completed output remains the native compact context window
+
+#### Scenario: A trigger caller omits tool declarations
+- **WHEN** a native trigger request omits tools or explicitly sends an empty tool list
+- **THEN** upstream preserves that field's absence or explicit empty value respectively
+
+#### Scenario: Retained objects have non-string type values
+- **WHEN** a valid native window includes an opaque retained JSON object whose type is an array, object, null or number
+- **THEN** capsule recognition uses a string guard and retains that object's fields unchanged without a transport or internal error
+- **AND** standalone JSON, compaction-trigger SSE and the signed internal bridge preserve the complete window with HTTP 200 after settlement
+
+#### Scenario: A native window continues an ordinary turn
+- **WHEN** a validated native window is reused for an ordinary Responses turn, directly or through a bridge
+- **THEN** its retained messages and capsule reach upstream unchanged, even when message text matches a former local fallback marker
+
+#### Scenario: A retained opaque type is reused for compaction
+- **WHEN** a returned window containing an array or object type is submitted for another compact operation
+- **THEN** file-owner extraction and forwarding preserve the object without an internal error
+
+### Requirement: Compaction uses its configured operation deadline
+The default compact operation budget MUST be 600 seconds. The upstream compact call MUST receive its remaining operation budget without a percentage-based or fixed-duration deduction. Cancellation and finalization MUST preserve owned admission and quota settlement.
+
+#### Scenario: An expensive compact call completes within the operation budget
+- **WHEN** an upstream compact call finishes after the former shortened deadline but before the configured deadline
+- **THEN** the service returns the completed compact response
+- **AND** its admission and quota ownership are settled exactly once
+
+#### Scenario: Cancellation follows completed upstream work
+- **WHEN** upstream has completed but cancellation interrupts admission cleanup or account-success handling
+- **THEN** the completed upstream usage is finalized exactly once before cancellation propagates
+- **AND** request logs retain that completed usage
+
+#### Scenario: A completed operation expires during teardown
+- **WHEN** the operation deadline expires after a validated result is retained but during response, owned-client or shared HTTP-lease teardown
+- **THEN** known usage and the returned service tier are settled exactly once before the timeout is surfaced
+- **AND** completed work is not retried or classified as an upstream health failure
+
+#### Scenario: Cancellation precedes SOCKS response ownership transfer
+- **WHEN** a compact caller is cancelled or reaches its deadline while Python SOCKS fallback waits for response headers
+- **THEN** the temporary session and connector are closed under joined cancellation protection before cancellation propagates
+- **AND** no ownerless response or session survives the request
+
+#### Scenario: SOCKS JSON fallback completes before session teardown
+- **WHEN** Python SOCKS fallback receives a valid compact JSON body and cancellation or deadline expiry interrupts session close
+- **THEN** validation and completion handoff precede teardown; known usage and tier are persisted once without replaying completed automation work
+- **AND** other response readers retain their existing ownership contract
+
+#### Scenario: Cancellation contends with shared HTTP generation release
+- **WHEN** edge or level cancellation interrupts compact teardown while the shared HTTP-client lock is contended
+- **THEN** the owned generation lease release is joined and decremented exactly once, allowing a retired generation to close
+- **AND** the original cancellation propagates after completed usage and its log are persisted
+
+#### Scenario: Cancellation interrupts completed transport teardown
+- **WHEN** a native response is parsed but edge or level cancellation interrupts response release or owned client close
+- **THEN** the parsed response and actual service tier reach the settlement owner before transport teardown starts
+- **AND** transport cleanup is joined, completed usage is finalized and logged, then the original cancellation propagates
+
+#### Scenario: Background compact consumers retain completed work
+- **WHEN** automation or warmup compaction completes before cancellation or deadline expiry during transport teardown
+- **THEN** its known usage and actual tier are retained before teardown and logged under joined cancellation protection
+- **AND** automation does not retry completed work on another account and warmup does not classify it as an upstream health failure
+- **AND** warmup logs keep their warmup kind and existing quota-accounting exclusion
+
+#### Scenario: Warmup waits for compact response headers
+- **WHEN** warmup upstream accepts a request but does not send response headers
+- **THEN** the remaining configured compact budget bounds transport response-head waiting and the caller
+- **AND** timeout joins the owned compact cleanup before releasing the warmup slot
+
+#### Scenario: Repeated cancellation overlaps quota persistence
+- **WHEN** edge or level cancellation occurs while compact quota settlement is pending
+- **THEN** the service joins its owned settlement task before propagating the original cancellation
+- **AND** cleanup-ready is signalled only after the owned reservation persistence attempts finish, not as proof that failed writes succeeded
+
+#### Scenario: Both compact settlement writes fail after upstream completion
+- **WHEN** finalization and fallback release both fail after compact upstream work completed
+- **THEN** forwarded SSE retains HTTP 200 and emits response.failed with usage_settlement_failed
+- **AND** the original reservation is not falsely marked released and the origin cannot replay or take over settlement
+
+### Requirement: Compact endpoint logs identify the real operation and session
+Calls to a compact endpoint MUST be logged with request kind compaction and the supplied session identity, even when the caller omits Codex turn metadata. Compact cleanup MUST join the database insert before returning, including under repeated edge or level cancellation. Ordinary response-stream logging MUST retain its asynchronous ownership.
+
+#### Scenario: An OpenAI-style native client supplies only session identity
+- **WHEN** a client calls the compact endpoint with a session_id header and no turn metadata
+- **THEN** its request log identifies that session and request kind compaction
+- **AND** response usage remains upstream-derived
+
+#### Scenario: Cancellation overlaps compact log persistence
+- **WHEN** the compact log database insert is pending and edge or level cancellation occurs
+- **THEN** the compact caller joins that insert before cancellation propagates
+- **AND** insertion failures keep the existing observational failure policy
+
+### Requirement: Compaction preserves complete validated history
+Compact preparation MUST preserve every supplied validated history item in order,
+including tool pairs, Lite state, inline images and file references. It MUST NOT
+estimate a token ceiling from JSON bytes, select a smaller history, or replace
+content with an omission marker. Actual ingress limits and upstream capacity
+errors MUST retain their existing error and ownership semantics.
+
+#### Scenario: Large history reaches the native compactor intact
+- **WHEN** a validated compact input exceeds the former estimated history budget
+- **THEN** the complete input is forwarded in its original order
+- **AND** historical file references still constrain account ownership
+
+#### Scenario: A validated compact window resembles an old fallback marker
+- **WHEN** a retained assistant message matches the old local-fallback text and precedes a nonempty opaque native capsule
+- **THEN** another compact request forwards both items unchanged and in order
+- **AND** marker text alone does not establish that a native capsule is invalid or authorize deleting history
+
+### Requirement: Native compact output is a validated upstream window
+A successful compact response MUST contain exactly one compaction item with
+nonempty opaque encrypted content. Plaintext messages MUST NOT be relabelled as
+encrypted compaction. Both compact JSON endpoints and the Codex compaction-trigger
+SSE endpoint MUST preserve the complete returned native context window and usage.
+Every retained output item MUST be a JSON object, validated before synthetic SSE starts.
+
+#### Scenario: A retained message accompanies the native capsule
+- **WHEN** upstream returns a retained message and one encrypted compaction item
+- **THEN** every downstream compact surface preserves both in order
+- **AND** SSE emits added and done events for every retained item and capsule at contiguous output indexes
+
+#### Scenario: A provider returns plaintext or multiple capsules
+- **WHEN** native output contains no encrypted capsule, multiple capsules, or an empty capsule
+- **THEN** the service returns invalid_compaction_response
+- **AND** it does not manufacture a successful native context window
+
+#### Scenario: An invalid retained item accompanies a valid capsule
+- **WHEN** upstream output includes a non-object retained item and a valid encrypted capsule
+- **THEN** compact handling fails with invalid_compaction_response before emitting response.created
+- **AND** no partial successful SSE window is constructed
+
+### Requirement: Native compact capability follows backend provenance
+Model metadata MUST advertise native_compaction_protocol responses_v2 only for
+subscription-backed native Responses models. Generic OpenAI-compatible model
+sources MUST NOT inherit that advertisement merely by being supported_in_api.
+
+#### Scenario: A generic model source appears in the model catalog
+- **WHEN** an OpenAI-compatible model source is included in the public catalog
+- **THEN** it has no subscription-native compaction protocol advertisement
+
+### Requirement: Movable stream selection prefers paired admission capacity
+Stream account selection MUST prefer candidates with both stream and
+response-create capacity before fresh selection or movable affinity. This
+preference MUST use stream admission's runtime/cap snapshot, preserve eligibility
+and ownership scope, and retain the response-create stage's final admission
+recheck. If no candidate has both kinds of capacity, existing admission errors
+MUST remain.
+
+#### Scenario: Busy soft owner has a usable sibling
+- **GIVEN** a prompt-cache owner has stream capacity but full response-create slots
+- **AND** an eligible sibling has both kinds of capacity
+- **WHEN** an HTTP streaming request selects its upstream account
+- **THEN** the sibling serves the request without a local response-create-cap error
+- **AND** transient capacity pressure does not replace the existing soft mapping
+
+#### Scenario: Fresh stream binding avoids response-create saturation
+- **GIVEN** an unbound stream can choose a full-create account or a usable sibling
+- **WHEN** selection runs before response-create admission
+- **THEN** it selects the usable sibling
+
+#### Scenario: Hard ownership is not overridden
+- **GIVEN** a hard continuity constraint requires a full-create account
+- **WHEN** a sibling has spare capacity
+- **THEN** selection remains constrained to the required owner
+
+#### Scenario: Every account has full response-create slots
+- **GIVEN** no candidate has available response-create capacity
+- **WHEN** stream selection runs
+- **THEN** existing response-create admission failure behavior is preserved

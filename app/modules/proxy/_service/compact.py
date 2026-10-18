@@ -10,8 +10,6 @@ from dataclasses import replace
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
-import anyio
-from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
@@ -43,7 +41,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
-from app.core.utils.shared_future import wait_on_shared_future
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -275,10 +273,7 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
 
 
 def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
-    if remaining_budget <= 0:
-        return 0.0
-    reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
-    return max(0.0, remaining_budget - reserve)
+    return max(0.0, remaining_budget)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -785,7 +780,7 @@ class _CompactMixin:
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
-        request_kind = _request_kind_from_headers(headers)
+        request_kind = "compaction"
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -821,12 +816,23 @@ class _CompactMixin:
                 # acknowledgement remains the origin's single release path.
                 return
             settlement_attempted = True
-            await proxy._settle_compact_api_key_usage(
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                response=response,
-                request_service_tier=request_service_tier,
+            cancellation = await _await_cleanup_deferring_cancellation(
+                proxy._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=response,
+                    request_service_tier=request_service_tier,
+                )
             )
+            if cancellation is not None:
+                raise cancellation
+
+        async def release_account_lease(lease: AccountLease | None) -> None:
+            cancellation = await _await_cleanup_deferring_cancellation(
+                proxy._load_balancer.release_account_lease(lease)
+            )
+            if cancellation is not None:
+                raise cancellation
 
         proxy._raise_for_unsupported_input_image_references(payload)
         try:
@@ -1027,12 +1033,15 @@ class _CompactMixin:
             nonlocal settlement_attempted
             settlement_attempted = True
             settlement_error: ProxyResponseError | None = None
+            cancellation: asyncio.CancelledError | None = None
             try:
-                await proxy._settle_compact_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=response,
-                    request_service_tier=request_service_tier,
+                cancellation = await _await_cleanup_deferring_cancellation(
+                    proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=response,
+                        request_service_tier=request_service_tier,
+                    )
                 )
             except ProxyResponseError as exc:
                 if exc.failure_phase != "usage_settlement" or not exc.reservation_released:
@@ -1042,37 +1051,18 @@ class _CompactMixin:
                 flush_deferred_health(),
                 name=f"compact-deferred-health-{request_id}",
             )
-            cancellation_pending = False
-            # The anyio shield keeps a level-cancelled Starlette scope from
-            # re-raising into every ``await`` (busy-spin), and
-            # ``wait_on_shared_future`` keeps waits off the task's
-            # done-callback list (3.14 shield leaks one per cancelled wait).
-            with anyio.CancelScope(shield=True):
-                while not flush_task.done():
-                    try:
-                        await wait_on_shared_future(flush_task)
-                    except asyncio.CancelledError:
-                        cancellation_pending = True
-                    except Exception:
-                        break
-            if not cancellation_pending:
-                # The shield also blocks the level cancellation this block
-                # promises to re-raise after the flush. Probe without
-                # suspending so a disconnected compact request still cancels.
-                try:
-                    await checkpoint_if_cancelled()
-                except asyncio.CancelledError:
-                    cancellation_pending = True
             try:
-                flush_task.result()
+                flush_cancellation = await _await_cleanup_deferring_cancellation(flush_task)
+                if cancellation is None:
+                    cancellation = flush_cancellation
             except Exception:
                 logger.warning(
                     "Failed to flush deferred compact account health request_id=%s",
                     request_id,
                     exc_info=True,
                 )
-            if cancellation_pending:
-                raise asyncio.CancelledError()
+            if cancellation is not None:
+                raise cancellation
             if settlement_error is not None:
                 raise settlement_error
 
@@ -1083,7 +1073,7 @@ class _CompactMixin:
                 await settle_compact_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
-                    response=None,
+                    response=response,
                     request_service_tier=request_service_tier,
                 )
             except Exception:
@@ -1133,7 +1123,14 @@ class _CompactMixin:
                 target: Account,
                 account_response_create_lease: AccountLease | None = None,
             ) -> CompactResponsePayload:
+                nonlocal response, actual_service_tier
                 nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
+
+                def retain_completed_response(completed: CompactResponsePayload) -> None:
+                    nonlocal response, actual_service_tier
+                    response = completed
+                    actual_service_tier = _service_tier_from_response(completed)
+
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -1199,6 +1196,7 @@ class _CompactMixin:
                                 access_token,
                                 account_id,
                                 optional_kwargs={
+                                    "on_response_completed": retain_completed_response,
                                     "route": route,
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
@@ -1216,6 +1214,7 @@ class _CompactMixin:
                             ),
                             timeout=upstream_budget,
                         )
+                        actual_service_tier = _service_tier_from_response(response)
                         logger.info(
                             "Compact upstream call complete request_id=%s account_id=%s elapsed_seconds=%.2f "
                             "timeout_seconds=%.2f",
@@ -1274,11 +1273,13 @@ class _CompactMixin:
                             route_endpoint_id = route_trace.endpoint_id
                             route_fallback_used = route_trace.fallback_used
                 finally:
-                    if create_lease is not None:
-                        create_lease.release()
-                    await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                    if timeout_tokens is not None:
-                        _service_pop_compact_timeout_overrides(timeout_tokens)
+                    try:
+                        if create_lease is not None:
+                            create_lease.release()
+                        await release_account_lease(account_response_create_lease)
+                    finally:
+                        if timeout_tokens is not None:
+                            _service_pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
@@ -1495,7 +1496,7 @@ class _CompactMixin:
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     # This budget-exhausted terminal exits compact_responses before
                     # reaching the retry loop's settle sites, so on the HTTP bridge /
                     # forwarded path (``owns_reservation`` false, ``compact_responses``
@@ -1517,7 +1518,7 @@ class _CompactMixin:
                         request_id,
                         remaining_budget,
                     )
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     # Sole-settler leak guard (see above): settle the reservation
                     # before this budget-exhausted terminal raise.
                     await settle_compact_usage(
@@ -1543,7 +1544,7 @@ class _CompactMixin:
                         account.id,
                     )
                 except ProxyResponseError:
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
                     # ensure_fresh_with_budget translates terminal process-network
                     # recovery outcomes before the compact upstream settlement
@@ -1556,7 +1557,7 @@ class _CompactMixin:
                     )
                     raise
                 except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
                     if isinstance(exc, RefreshError):
                         if exc.is_permanent:
@@ -1673,7 +1674,7 @@ class _CompactMixin:
                     excluded_account_ids.add(account.id)
                     continue
                 except BaseException:
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
                     raise
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -1683,7 +1684,7 @@ class _CompactMixin:
                         request_id,
                         account.id,
                     )
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await release_account_lease(selected_account_response_create_lease)
                     # Sole-settler leak guard (see above): settle the reservation
                     # before this budget-exhausted terminal raise.
                     await settle_compact_usage(
@@ -1717,6 +1718,17 @@ class _CompactMixin:
                         return response
                     except ProxyResponseError as exc:
                         if exc.failure_phase == "usage_settlement":
+                            raise
+                        if response is not None:
+                            # Completion survived transport teardown, even if
+                            # wait_for surfaced a deadline or cleanup failure.
+                            # Charge known work without replay or provider blame.
+                            await settle_compact_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=response,
+                                request_service_tier=request_service_tier,
+                            )
                             raise
                         compact_continuity_error = _compact_previous_response_not_found_error(exc)
                         if compact_continuity_error is not None:
@@ -2164,48 +2176,53 @@ class _CompactMixin:
         finally:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None
-            await proxy._write_request_log(
-                affinity_observation=affinity_observation,
-                account_id=account_id_value,
-                api_key=api_key,
-                request_id=request_id,
-                model=payload.model,
-                latency_ms=int((_service_time().monotonic() - start) * 1000),
-                status=log_status,
-                error_code=log_error_code,
-                error_message=log_error_message,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                cached_input_tokens=(
-                    usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
-                ),
-                reasoning_tokens=(
-                    usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
-                ),
-                reasoning_effort=reasoning_effort,
-                transport=_REQUEST_TRANSPORT_HTTP,
-                service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
-                requested_service_tier=request_service_tier,
-                actual_service_tier=actual_service_tier,
-                failure_phase=failure_metadata.failure_phase,
-                failure_detail=failure_metadata.failure_detail,
-                failure_exception_type=failure_metadata.failure_exception_type,
-                upstream_status_code=failure_metadata.upstream_status_code,
-                upstream_error_code=failure_metadata.upstream_error_code,
-                bridge_stage=failure_metadata.bridge_stage,
-                upstream_proxy_route_mode=route_mode,
-                upstream_proxy_pool_id=route_pool_id,
-                upstream_proxy_endpoint_id=route_endpoint_id,
-                upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
-                upstream_proxy_fail_closed_reason=route_fail_closed_reason,
-                useragent=useragent,
-                useragent_group=useragent_group,
-                conversation_id=conversation_id,
-                client_ip=client_ip,
-                request_kind=request_kind,
+            log_cancellation = await _await_cleanup_deferring_cancellation(
+                proxy._write_request_log(
+                    affinity_observation=affinity_observation,
+                    account_id=account_id_value,
+                    api_key=api_key,
+                    request_id=request_id,
+                    model=payload.model,
+                    latency_ms=int((_service_time().monotonic() - start) * 1000),
+                    status=log_status,
+                    error_code=log_error_code,
+                    error_message=log_error_message,
+                    input_tokens=usage.input_tokens if usage else None,
+                    output_tokens=usage.output_tokens if usage else None,
+                    cached_input_tokens=(
+                        usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
+                    ),
+                    reasoning_tokens=(
+                        usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+                    ),
+                    reasoning_effort=reasoning_effort,
+                    transport=_REQUEST_TRANSPORT_HTTP,
+                    session_id=_owner_lookup_session_id_from_headers(headers),
+                    service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
+                    requested_service_tier=request_service_tier,
+                    actual_service_tier=actual_service_tier,
+                    failure_phase=failure_metadata.failure_phase,
+                    failure_detail=failure_metadata.failure_detail,
+                    failure_exception_type=failure_metadata.failure_exception_type,
+                    upstream_status_code=failure_metadata.upstream_status_code,
+                    upstream_error_code=failure_metadata.upstream_error_code,
+                    bridge_stage=failure_metadata.bridge_stage,
+                    upstream_proxy_route_mode=route_mode,
+                    upstream_proxy_pool_id=route_pool_id,
+                    upstream_proxy_endpoint_id=route_endpoint_id,
+                    upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
+                    upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
+                    conversation_id=conversation_id,
+                    client_ip=client_ip,
+                    request_kind=request_kind,
+                )
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
             )
+            if log_cancellation is not None:
+                raise log_cancellation

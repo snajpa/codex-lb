@@ -15,16 +15,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, pop_compact_timeout_overrides, push_compact_timeout_overrides
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.dashboard_overrides import dashboard_overrides_bound
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
+from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
@@ -1192,6 +1194,54 @@ class AutomationsService:
             ):
                 continue
 
+            completion_account_id = account.id
+            completed_response: CompactResponsePayload | None = None
+            completed_data: AutomationRunData | None = None
+            completed_error_code: str | None = None
+            completed_error_message: str | None = None
+
+            def retain_completed_response(response: CompactResponsePayload) -> None:
+                nonlocal completed_response
+                completed_response = response
+
+            async def persist_completed_attempt() -> None:
+                nonlocal completed_data
+                assert completed_response is not None
+                input_tokens, output_tokens, cached_tokens, reasoning_tokens, service_tier = (
+                    _extract_compact_usage_fields(completed_response)
+                )
+                await self._write_request_log(
+                    account_id=completion_account_id,
+                    request_id=_automation_request_id(getattr(completed_response, "id", None), run.id, attempt_count),
+                    model=run_model,
+                    reasoning_effort=wire_reasoning_effort,
+                    latency_ms=_elapsed_ms(request_started_at),
+                    status="error" if completed_error_code else "success",
+                    error_code=completed_error_code,
+                    error_message=completed_error_message,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_input_tokens=cached_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    service_tier=service_tier,
+                )
+                completed = await self._repository.complete_run(
+                    run.id,
+                    status=(
+                        AUTOMATION_RUN_STATUS_FAILED
+                        if completed_error_code
+                        else AUTOMATION_RUN_STATUS_PARTIAL
+                        if attempt_count > 1
+                        else AUTOMATION_RUN_STATUS_SUCCESS
+                    ),
+                    finished_at=utcnow(),
+                    account_id=completion_account_id,
+                    error_code=completed_error_code,
+                    error_message=completed_error_message,
+                    attempt_count=attempt_count,
+                )
+                completed_data = self._to_run_data(completed)
+
             try:
                 attempt_count += 1
                 last_attempted_account_id = account_id
@@ -1211,49 +1261,23 @@ class AutomationsService:
                 # C2-3 resilience toggles: background job, no request snapshot
                 # to inherit; take one so the breaker gate follows the dashboard.
                 bind_resilience_toggles(await get_settings_cache().get())
-                compact_response = await asyncio.wait_for(
-                    core_compact_responses(
-                        ping_request,
-                        headers={},
-                        access_token=access_token,
-                        account_id=_header_account_id(account.chatgpt_account_id),
-                        route=route,
-                        allow_direct_egress=route is None,
-                    ),
-                    timeout=_automation_compact_request_timeout_seconds(run),
-                )
-                latency_ms = _elapsed_ms(request_started_at)
-                request_id = _automation_request_id(getattr(compact_response, "id", None), run.id, attempt_count)
-                (
-                    input_tokens,
-                    output_tokens,
-                    cached_input_tokens,
-                    reasoning_tokens,
-                    service_tier,
-                ) = _extract_compact_usage_fields(compact_response)
-                await self._write_request_log(
-                    account_id=account.id,
-                    request_id=request_id,
-                    model=run_model,
-                    reasoning_effort=wire_reasoning_effort,
-                    latency_ms=latency_ms,
-                    status="success",
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    service_tier=service_tier,
-                )
-                completed = await self._repository.complete_run(
-                    run.id,
-                    status=AUTOMATION_RUN_STATUS_PARTIAL if attempt_count > 1 else AUTOMATION_RUN_STATUS_SUCCESS,
-                    finished_at=utcnow(),
-                    account_id=account.id,
-                    error_code=None,
-                    error_message=None,
-                    attempt_count=attempt_count,
-                )
-                return self._to_run_data(completed)
+                timeout_seconds = _automation_compact_request_timeout_seconds(run)
+                timeout_token = push_compact_timeout_overrides(total_timeout_seconds=timeout_seconds)
+                try:
+                    completed_response = await asyncio.wait_for(
+                        core_compact_responses(
+                            ping_request,
+                            headers={},
+                            access_token=access_token,
+                            account_id=_header_account_id(account.chatgpt_account_id),
+                            route=route,
+                            allow_direct_egress=route is None,
+                            on_response_completed=retain_completed_response,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                finally:
+                    pop_compact_timeout_overrides(timeout_token)
             except RefreshError as exc:
                 last_error_code = exc.code or "authentication_error"
                 last_error_message = exc.message
@@ -1264,24 +1288,27 @@ class AutomationsService:
                 error_code, error_message = _extract_proxy_error(exc)
                 last_error_code = error_code
                 last_error_message = error_message
-                await self._write_request_log(
-                    account_id=account.id,
-                    request_id=_automation_request_id(None, run.id, attempt_count),
-                    model=run_model,
-                    reasoning_effort=wire_reasoning_effort,
-                    latency_ms=_elapsed_ms(request_started_at),
-                    status="error",
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-                await self._mark_permanent_account_failure(account, error_code)
-                if self._is_retryable_account_failure(error_code):
-                    continue
-                break
+                completed_error_code, completed_error_message = error_code, error_message
+                if completed_response is None:
+                    await self._write_request_log(
+                        account_id=account.id,
+                        request_id=_automation_request_id(None, run.id, attempt_count),
+                        model=run_model,
+                        reasoning_effort=wire_reasoning_effort,
+                        latency_ms=_elapsed_ms(request_started_at),
+                        status="error",
+                        error_code=error_code,
+                        error_message=error_message,
+                    )
+                    await self._mark_permanent_account_failure(account, error_code)
+                    if self._is_retryable_account_failure(error_code):
+                        continue
+                    break
             except Exception as exc:
                 last_error_code = "automation_ping_failed"
                 last_error_message = str(exc) or "Automation ping failed"
-                if request_started_at is not None:
+                completed_error_code, completed_error_message = last_error_code, last_error_message
+                if completed_response is None and request_started_at is not None:
                     await self._write_request_log(
                         account_id=account.id,
                         request_id=_automation_request_id(None, run.id, attempt_count),
@@ -1292,7 +1319,20 @@ class AutomationsService:
                         error_code=last_error_code,
                         error_message=last_error_message,
                     )
-                continue
+                if completed_response is None:
+                    continue
+
+            except asyncio.CancelledError:
+                completed_error_code = "request_cancelled"
+                completed_error_message = "Automation compact request cancelled"
+                raise
+            finally:
+                if completed_response is not None:
+                    cancellation = await _await_cleanup_deferring_cancellation(persist_completed_attempt())
+                    if cancellation is not None:
+                        raise cancellation
+            if completed_data is not None:
+                return completed_data
 
         completed = await self._repository.complete_run(
             run.id,

@@ -30,6 +30,7 @@ const UsageHistoryItemSchema = z.object({
   remainingPercentAvg: z.number().nullable(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
+  capacityKnown: z.boolean().default(true),
 });
 
 export const UsageWindowSchema = z.object({
@@ -42,6 +43,7 @@ const UsageSummaryWindowSchema = z.object({
   remainingPercent: z.number(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
+  unquantifiedAccountCount: z.number().int().nonnegative().default(0),
   resetAt: z.iso.datetime({ offset: true }).nullable(),
   windowMinutes: z.number().nullable(),
 });
@@ -163,6 +165,36 @@ const WeeklyCreditPaceSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
 });
 
+export const AccountQuotaBurnSchema = z.object({
+  accountId: z.string(),
+  window: z.enum(["primary", "secondary"]),
+  windowMinutes: z.number().nullable().optional(),
+  remainingPercent: z.number(),
+  ratePercentPerHour: z.number().nullable(),
+  observationMinutes: z.number(),
+  sampleAgeSeconds: z.number(),
+  generatedAt: z.iso.datetime({ offset: true }),
+  freshnessSeconds: z.number(),
+  stale: z.boolean(),
+  resetAt: z.iso.datetime({ offset: true }).nullable(),
+  projectedExhaustionAt: z.iso.datetime({ offset: true }).nullable(),
+});
+export type AccountQuotaBurn = z.infer<typeof AccountQuotaBurnSchema>;
+
+export const ApiSpendProjectionSchema = z.object({
+  lookbackMinutes: z.number(),
+  observedMinutes: z.number(),
+  requests: z.number().int(),
+  requestsWithCost: z.number().int(),
+  requestsWithUncachedComparison: z.number().int(),
+  recordedCostUsd: z.number().nullable(),
+  projected24hUsd: z.number().nullable(),
+  projectedUncached24hUsd: z.number().nullable(),
+  cachedInputPercent: z.number().nullable(),
+  requestedPriorityDeliveredDefault: z.number().int(),
+});
+export type ApiSpendProjection = z.infer<typeof ApiSpendProjectionSchema>;
+
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.iso.datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
@@ -180,15 +212,18 @@ export const DashboardOverviewSchema = z.object({
   }),
   trends: MetricsTrendsSchema,
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
+  apiSpendProjection: ApiSpendProjectionSchema.nullable().optional(),
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
+  quotaBurn: z.array(AccountQuotaBurnSchema).optional(),
 });
 
 export const DashboardProjectionsSchema = z.object({
   depletionPrimary: DepletionSchema.nullable().optional(),
   depletionSecondary: DepletionSchema.nullable().optional(),
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
+  quotaBurn: z.array(AccountQuotaBurnSchema).optional(),
 });
 
 const RequestLogCostBreakdownSchema = z.object({

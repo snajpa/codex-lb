@@ -250,15 +250,16 @@ async def _iter_account_capacity_recovery_wait(
     scheduler: Scheduler = REAL_SCHEDULER,
     clock: Clock = REAL_CLOCK,
 ) -> AsyncIterator[str]:
-    # ``remaining_budget_seconds`` is sampled by the caller through the owner's
-    # budget seam (``proxy._remaining_budget_seconds``), so this owner-less
-    # helper never reads a clock of its own for budget math; ``clock`` only
-    # stamps the wait start and ``scheduler`` owns the heartbeat sleeps.
+    # The caller samples the owner's remaining budget. Keep that same snapshot
+    # as a deadline so scheduler oversleep or backpressure cannot buy more time.
+    # ``scheduler`` owns the heartbeat sleeps and ``clock`` measures their effect.
     if not emit_keepalives:
         _signal_propagated_capacity_startup_wait()
     if remaining_budget_seconds <= 0:
         return
     wait_started_at = clock.monotonic()
+    budget_deadline = wait_started_at + remaining_budget_seconds
+    wait_deadline = wait_started_at + min(recovery_sleep_seconds, remaining_budget_seconds)
     remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
     _facade().logger.info(
         "Waiting for account capacity before retrying stream request_id=%s model=%s account_id=%s "
@@ -286,12 +287,21 @@ async def _iter_account_capacity_recovery_wait(
                     ),
                 )
             )
+        resumed_at = clock.monotonic()
         chunk_seconds = min(
             remaining_sleep_seconds,
             _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+            max(0.0, budget_deadline - resumed_at),
+            max(0.0, wait_deadline - resumed_at),
         )
+        if chunk_seconds <= 0:
+            return
         await scheduler.sleep(chunk_seconds)
         remaining_sleep_seconds -= chunk_seconds
+        remaining_sleep_seconds = min(
+            remaining_sleep_seconds,
+            max(0.0, wait_deadline - clock.monotonic()),
+        )
 
 
 def _retry_after_kwargs(retry_after_seconds: float | None) -> dict[str, float]:
@@ -1000,6 +1010,8 @@ class _StreamingRetryMixin:
                         if close_cancellation is not None:
                             raise close_cancellation
                 except ProxyResponseError as exc:
+                    if settlement.upstream_terminal_at is not None:
+                        raise
                     if is_confirmed_pre_dispatch_transport_error(exc):
                         # Keep dispatch provenance intact for the outer account
                         # failover handler. Converting this into the generic
@@ -1061,6 +1073,14 @@ class _StreamingRetryMixin:
                                 settlement,
                                 account,
                                 settlement_order_required=True,
+                            )
+                        raise
+                    except _TerminalStreamError:
+                        raise
+                    except Exception:
+                        if settlement.upstream_terminal_at is not None and not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(
+                                settlement, account, settlement_order_required=True
                             )
                         raise
                     network_recovery.log_recovered()
@@ -1138,6 +1158,10 @@ class _StreamingRetryMixin:
                     )
                     return
                 except ProxyResponseError as exc:
+                    if settlement.upstream_terminal_at is not None:
+                        if not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                        raise
                     if _must_abort_native_transport_failure(
                         exc,
                         downstream_visible=settlement.downstream_visible,
@@ -2346,7 +2370,16 @@ class _StreamingRetryMixin:
                             if settlement.status in {"success", "error"} and not settled:
                                 await _finalize_terminal_settlement_after_downstream_close(settlement, account)
                             raise
-                        except (_TransientStreamError, ProxyResponseError) as tex:
+                        except _TerminalStreamError:
+                            # The outer terminal handler owns this outcome and
+                            # its settlement/health writes, exactly once.
+                            raise
+                        except Exception as tex:
+                            if settlement.upstream_terminal_at is not None:
+                                await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                                raise
+                            if not isinstance(tex, (_TransientStreamError, ProxyResponseError)):
+                                raise
                             if isinstance(tex, ProxyResponseError) and _must_abort_native_transport_failure(
                                 tex,
                                 downstream_visible=settlement.downstream_visible,
@@ -2691,9 +2724,9 @@ class _StreamingRetryMixin:
                                         error_message=error_message,
                                         recovery_sleep_seconds=delay,
                                         remaining_budget_seconds=proxy._remaining_budget_seconds(deadline),
-                                        # The wait is bounded (<= 10 s) so no
-                                        # keepalive is needed; on the propagating
-                                        # route a keepalive frame would commit
+                                        # Hold startup headers throughout the
+                                        # budget-bounded upstream cooldown. On
+                                        # the propagating route a frame commits
                                         # 200/SSE and make the surfaced 429
                                         # unreachable as an HTTP status.
                                         emit_keepalives=not propagate_http_errors,
@@ -2894,6 +2927,10 @@ class _StreamingRetryMixin:
                             )
                     return
                 except ProxyResponseError as exc:
+                    if settlement.upstream_terminal_at is not None:
+                        if not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                        raise
                     if _must_abort_native_transport_failure(
                         exc,
                         downstream_visible=settlement.downstream_visible,
@@ -3186,6 +3223,10 @@ class _StreamingRetryMixin:
                                 if close_cancellation is not None:
                                     raise close_cancellation
                         except ProxyResponseError as retry_exc:
+                            if settlement.upstream_terminal_at is not None:
+                                if not settled:
+                                    await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                                raise
                             if _must_abort_native_transport_failure(
                                 retry_exc,
                                 downstream_visible=settlement.downstream_visible,
@@ -3562,6 +3603,10 @@ class _StreamingRetryMixin:
                     yield format_sse_event(event)
                     return
                 except RefreshError as exc:
+                    if settlement.upstream_terminal_at is not None:
+                        if not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                        raise
                     if exc.is_permanent:
                         await proxy._load_balancer.mark_permanent_failure(account, exc.code)
                         await _release_tracked_stream_lease(current_account_lease)
@@ -3569,6 +3614,10 @@ class _StreamingRetryMixin:
                         excluded_account_ids.add(account.id)
                     continue
                 except Exception:
+                    if settlement.upstream_terminal_at is not None:
+                        if not settled:
+                            await _finalize_terminal_settlement_after_downstream_close(settlement, account)
+                        raise
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                     _facade().logger.warning(
                         "Proxy streaming failed without retry account_id=%s request_id=%s",

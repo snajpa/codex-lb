@@ -1527,7 +1527,7 @@ A terminal no-account result MUST change global degraded state only when the att
 
 ### Requirement: Owner-bound requests retry the same owner after an upstream burst rejection
 
-When a pre-visible upstream failure on the HTTP stream transport is a code-less HTTP 429 (classified `retryable_transient` with HTTP status 429) and the request is **owner-bound** — it cannot be dispatched to another account because its payload replay is bound to the failed account (input items that are not account-neutral, such as `reasoning`), because a required preferred account, a file-pin owner, or a turn-state owner names that account, or because single-account routing is configured — the failover decision MUST be `retry_same_account` while a same-account retry is available and `surface` otherwise; it MUST NOT be `failover_next`, since an owner-bound request can never cross accounts. A same-account retry is available only while fewer than 3 same-account burst retries have been made for that account within the request, the request's remaining startup budget is positive, and no downstream-visible output has been emitted. For each `retry_same_account` the proxy MUST keep the account selectable for the request (no exclusion, replay binding kept), engage the `account-routing` burst cooldown for the account immediately (replica-local runtime state only, so other requests are steered away during the burst whether or not the stream is keyed), and wait `min(10 s, max(retry_after, 1 s * 2^(n-1)))` for retry `n` (1 s, 2 s, 4 s without an upstream `Retry-After`; the upstream value is a floor) through the propagated startup wait, so the HTTP response status and headers are not committed during the wait; on a route that propagates HTTP errors the wait MUST NOT emit keepalive frames (a frame would commit a 200/SSE response), and the startup probe MUST keep holding the headers across consecutive waits. The wait MUST be bounded by the remaining request budget and MUST use the stream scheduler and clock seams rather than raw sleeps. A same-account retry MUST NOT record a transient error penalty against the owner: the penalty is written exactly once, when the failure is finally surfaced, so a bursting owner never enters selection error backoff and a successful retry is never followed by a deferred penalty. On the pre-visible path the stream lease is kept across the retry (the redispatch stays inside the admitted slot); on the post-refresh path the lease is released before the same owner is re-selected. When the retry count is exhausted or the budget is spent, the proxy MUST surface the original upstream 429 status and body, and the surfaced response MUST carry a `Retry-After` header equal to the upstream value when present and `5` otherwise. The `Failover decision` log line MUST report the action that is actually executed. A request that is not owner-bound MUST keep the existing `failover_next` handling. The same rule MUST apply to the failover decision taken after a 401 token refresh.
+When a pre-visible upstream failure on the HTTP stream transport is a code-less HTTP 429 (classified `retryable_transient` with HTTP status 429) and the request is **owner-bound** — it cannot be dispatched to another account because its payload replay is bound to the failed account (input items that are not account-neutral, such as `reasoning`), because a required preferred account, a file-pin owner, or a turn-state owner names that account, or because single-account routing is configured — the failover decision MUST be `retry_same_account` while a same-account retry is available and `surface` otherwise; it MUST NOT be `failover_next`, since an owner-bound request can never cross accounts. A same-account retry is available only while fewer than 3 same-account burst retries have been made for that account within the request, the request's remaining startup budget is positive, and no downstream-visible output has been emitted. For each `retry_same_account` the proxy MUST keep the account selectable for the request (no exclusion, replay binding kept), engage the `account-routing` burst cooldown for the account immediately (replica-local runtime state only, so other requests are steered away during the burst whether or not the stream is keyed), and wait `max(retry_after, min(10 s, 1 s * 2^(n-1)))` for retry `n` (1 s, 2 s, 4 s without an upstream `Retry-After`; the ten-second cap applies only to generated backoff, and a positive upstream value is a floor) through the propagated startup wait, so the HTTP response status and headers are not committed during the wait; on a route that propagates HTTP errors the wait MUST NOT emit keepalive frames (a frame would commit a 200/SSE response), and the startup probe MUST keep holding the headers across consecutive waits. The wait MUST be bounded by the remaining request budget and MUST use the stream scheduler and clock seams rather than raw sleeps. A same-account retry MUST NOT record a transient error penalty against the owner: the penalty is written exactly once, when the failure is finally surfaced, so a bursting owner never enters selection error backoff and a successful retry is never followed by a deferred penalty. On the pre-visible path the stream lease is kept across the retry (the redispatch stays inside the admitted slot); on the post-refresh path the lease is released before the same owner is re-selected. When the retry count is exhausted or the budget is spent, the proxy MUST surface the original upstream 429 status and body, and the surfaced response MUST carry a `Retry-After` header equal to the upstream value when present and `5` otherwise. The `Failover decision` log line MUST report the action that is actually executed. A request that is not owner-bound MUST keep the existing `failover_next` handling. The same rule MUST apply to the failover decision taken after a 401 token refresh.
 
 #### Scenario: Same owner is retried after a bounded backoff while headers are held
 
@@ -1603,3 +1603,33 @@ When a pre-visible upstream failure on the HTTP stream transport is a code-less 
 - **THEN** the failover decision is `failover_next`
 - **AND** the next selection excludes account A and, while another candidate exists, the burst cooldown steers it away from A as well
 
+### Requirement: Cooldown waits remain bounded by the request budget
+
+Cooldown waits MUST recheck elapsed time through the clock seam between chunks.
+Each sleep MUST be clipped to both the recovery-wait deadline and request-budget
+deadline after downstream delivery resumes; an elapsed deadline MUST cause no
+additional sleep.
+Budget exhaustion MUST surface the original 429 and Retry-After without another
+dispatch or sleep. Cancellation MUST preserve existing resource cleanup.
+
+#### Scenario: Budget cannot accommodate the upstream cooldown
+
+- **GIVEN** an owner-bound request with 12 seconds remaining and Retry-After 18
+- **WHEN** the wait exhausts the remaining request budget
+- **THEN** there is no second upstream dispatch
+- **AND** the original HTTP 429 and Retry-After 18 are surfaced
+
+#### Scenario: Cancellation during a long upstream cooldown
+
+- **GIVEN** an owner-bound request waiting after HTTP 429 and Retry-After 18
+- **WHEN** the downstream request is cancelled during the wait
+- **THEN** the wait is cancelled and no additional dispatch occurs
+- **AND** admitted leases and usage reservations retain their existing cleanup
+
+
+#### Scenario: Downstream backpressure consumes part of a capacity-recovery wait
+
+- **GIVEN** a capacity-recovery wait of 30 seconds within a 32-second request budget
+- **WHEN** delivery of its keepalive suspends the generator for 25 seconds
+- **THEN** the remaining sleep is at most 5 seconds and same-owner retry retains 2 seconds
+- **AND** if delivery resumes after the recovery deadline, no extra sleep occurs

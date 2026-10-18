@@ -10,7 +10,7 @@ from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
-from app.db.dialect_sql import dialect_name, is_mysql
+from app.db.dialect_sql import is_mariadb, is_mysql
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
@@ -215,8 +215,11 @@ async def _mysql_acquire_remaining(session: AsyncSession, *, leader_id: str, ttl
     # Single-statement conditional upsert: the guard lives inside the IF()
     # assignments, so there is no SELECT ... FOR UPDATE followed by INSERT
     # (gap lock + insert intention) deadlock window under concurrent replicas.
+    # The URL's mysql dialect name persists on MariaDB. Opening the connection
+    # initializes the server capability flags before choosing the upsert syntax.
+    connection = await session.connection()
     await session.execute(
-        text(_mysql_acquire_sql(ttl_us=ttl_us, mariadb=dialect_name(session) == "mariadb")),
+        text(_mysql_acquire_sql(ttl_us=ttl_us, mariadb=is_mariadb(connection))),
         {"leader_id": leader_id},
     )
     row = (
