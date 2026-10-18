@@ -230,9 +230,9 @@ export function DashboardPage() {
   // An explicit unavailable overview also invalidates a retained projection.
   const selectedWeeklyPace = overview?.weeklyCreditPace === null
     ? null
-    : burnWindowMinutes === 180 && overview?.weeklyCreditPace !== undefined
-      ? overview.weeklyCreditPace
-      : projectionsQuery.data?.weeklyCreditPace ?? null;
+    : projectionsQuery.data?.weeklyCreditPace !== undefined
+      ? projectionsQuery.data.weeklyCreditPace
+      : burnWindowMinutes === 180 ? overview?.weeklyCreditPace ?? null : null;
   const logPage = logsQuery.data;
 
   const view = useMemo(() => {
