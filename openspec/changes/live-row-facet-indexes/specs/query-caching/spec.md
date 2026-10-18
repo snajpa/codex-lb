@@ -29,3 +29,10 @@ When `GET /api/request-logs/options` is requested without user-supplied filters,
 
 - **WHEN** the options endpoint is called with any user filter (`since`, `until`, account, api-key, model, or reasoning-effort constraints)
 - **THEN** the facets MUST apply those filters with unchanged semantics and results
+
+#### Scenario: SQLite facet traversal does not require planner statistics
+
+- **GIVEN** SQLite request logs with many repeated visible rows, the standard facet indexes, and no planner statistics
+- **WHEN** the unfiltered options endpoint is called
+- **THEN** facet traversal MUST use the facet's ordered values and equality-constrained eligibility checks
+- **AND** adding duplicate visible rows MUST NOT cause each recursive step to rescan the entire live-row cohort
