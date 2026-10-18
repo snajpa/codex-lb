@@ -6,9 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
-import { createDashboardProjections } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardProjections } from "@/test/mocks/factories";
 import type { WeeklyPaceWindowMinutes } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { buildWeeklyCreditPace } from "@/features/dashboard/utils";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -25,6 +26,19 @@ function createWrapper(queryClient: QueryClient) {
   return function Wrapper({ children }: PropsWithChildren) {
     return createElement(QueryClientProvider, { client: queryClient }, children);
   };
+}
+
+function eagerProjection() {
+  const estimate = buildWeeklyCreditPace([createAccountSummary({
+    resetAtSecondary: new Date(Date.now() + 3 * 86400000).toISOString(),
+  })]);
+  if (!estimate) throw new Error("Missing pace fixture");
+  const pace = (minutes: WeeklyPaceWindowMinutes) => ({
+    ...estimate, burnWindowMinutes: minutes, paceGapSmoothingMinutes: 30,
+    burnRateRecentCreditsPerHour: minutes, forecastBurnRateCreditsPerHour: minutes,
+  });
+  return createDashboardProjections({ weeklyCreditPace: pace(180),
+    weeklyCreditPaceWindows: { 5: pace(5), 15: pace(15), 60: pace(60), 180: pace(180) } });
 }
 
 describe("useDashboard", () => {
@@ -93,44 +107,17 @@ describe("useDashboard", () => {
       wrapper: createWrapper(queryClient),
     });
 
-    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections", 180] });
+    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections", "all-windows"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
     expect(refetchInterval).toBe(5_000);
   });
 
-  it("keeps a late response in its own averaging-window cache", async () => {
-    let releaseShort!: () => void;
-    const shortResponse = new Promise<void>((resolve) => { releaseShort = resolve; });
-    const requested: number[] = [];
-    server.use(http.get("/api/dashboard/projections", async ({ request }) => {
-      const minutes = Number(new URL(request.url).searchParams.get("burnWindowMinutes") ?? 180);
-      requested.push(minutes);
-      if (minutes === 5) await shortResponse;
-      return HttpResponse.json({ ...createDashboardProjections(), quotaBurn: [],
-        depletionPrimary: { risk: minutes, riskLevel: "safe", burnRate: minutes,
-          safeUsagePercent: 50, projectedExhaustionAt: null, secondsUntilExhaustion: null } });
-    }));
-    const queryClient = createTestQueryClient();
-    queryClient.setQueryDefaults(["dashboard", "projections"], { gcTime: Infinity });
-    const { result, rerender } = renderHook(
-      ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
-      { wrapper: createWrapper(queryClient), initialProps: { minutes: 5 as WeeklyPaceWindowMinutes } },
-    );
-    await waitFor(() => expect(requested).toContain(5));
-    rerender({ minutes: 15 });
-    await waitFor(() => expect(result.current.data?.depletionPrimary?.burnRate).toBe(15));
-    releaseShort();
-    await waitFor(() => expect(queryClient.getQueryData(["dashboard", "projections", 5])).toBeDefined());
-    expect(result.current.data?.depletionPrimary?.burnRate).toBe(15);
-    expect(requested).toEqual([5, 15]);
-  });
-
-  it("does not retain another window's result when the selected request fails", async () => {
+  it("loads every window in one request before selection and switches from cache", async () => {
+    const requested: string[] = [];
     server.use(http.get("/api/dashboard/projections", ({ request }) => {
-      return new URL(request.url).searchParams.get("burnWindowMinutes") === "5"
-        ? HttpResponse.json({ error: { code: "failed", message: "unavailable" } }, { status: 503 })
-        : HttpResponse.json(createDashboardProjections());
+      requested.push(request.url);
+      return HttpResponse.json(eagerProjection());
     }));
     const queryClient = createTestQueryClient();
     const { result, rerender } = renderHook(
@@ -138,9 +125,73 @@ describe("useDashboard", () => {
       { wrapper: createWrapper(queryClient), initialProps: { minutes: 180 as WeeklyPaceWindowMinutes } },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.weeklyCreditPaceWindows).toBeDefined();
+    for (const minutes of [5, 15, 60, 180] as const) {
+      rerender({ minutes });
+      expect(result.current.data?.weeklyCreditPace?.burnRateRecentCreditsPerHour).toBe(minutes);
+      expect(result.current.data?.weeklyCreditPace?.burnWindowMinutes).toBe(minutes);
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.isFetching).toBe(false);
+    }
+    expect(requested).toHaveLength(1);
+    expect(new URL(requested[0]).searchParams.has("burnWindowMinutes")).toBe(false);
+  });
+
+  it("honors selection made while the shared background read is pending", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let requests = 0;
+    server.use(http.get("/api/dashboard/projections", async () => {
+      requests += 1;
+      await held;
+      return HttpResponse.json(eagerProjection());
+    }));
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
+      { wrapper: createWrapper(queryClient), initialProps: { minutes: 180 as WeeklyPaceWindowMinutes } },
+    );
+    await waitFor(() => expect(requests).toBe(1));
     rerender({ minutes: 5 });
+    rerender({ minutes: 60 });
+    expect(result.current.isLoading).toBe(true);
+    release();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.weeklyCreditPace?.burnWindowMinutes).toBe(60);
+    expect(requests).toBe(1);
+  });
+
+  it("keeps correct cached values during a shared refresh error and recovers", async () => {
+    let fail = false;
+    server.use(http.get("/api/dashboard/projections", () => fail
+      ? HttpResponse.json({ error: { code: "failed", message: "unavailable" } }, { status: 503 })
+      : HttpResponse.json(eagerProjection())));
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ minutes }: { minutes: WeeklyPaceWindowMinutes }) => useDashboardProjections(true, minutes),
+      { wrapper: createWrapper(queryClient), initialProps: { minutes: 180 as WeeklyPaceWindowMinutes } },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    fail = true;
+    await result.current.refetch();
     await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(result.current.data).toBeUndefined();
+    rerender({ minutes: 5 });
+    expect(result.current.data?.weeklyCreditPace?.burnWindowMinutes).toBe(5);
+    expect(result.current.isLoading).toBe(false);
+    fail = false;
+    await result.current.refetch();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.weeklyCreditPace?.burnRateRecentCreditsPerHour).toBe(5);
+  });
+
+  it("does not replace an explicitly unavailable window with the default value", async () => {
+    const data = eagerProjection();
+    data.weeklyCreditPaceWindows![5] = null;
+    server.use(http.get("/api/dashboard/projections", () => HttpResponse.json(data)));
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useDashboardProjections(true, 5), { wrapper: createWrapper(queryClient) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.weeklyCreditPace).toBeNull();
   });
 
   it("exposes error state on request failure", async () => {

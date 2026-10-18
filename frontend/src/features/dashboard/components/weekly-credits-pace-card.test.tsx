@@ -487,13 +487,13 @@ describe("weekly pace averaging controls", () => {
     render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={5} onBurnWindowChange={vi.fn()} isLoading />);
     expect(screen.getByRole("button", { name: "5 min" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByText("50%")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading the selected averaging window");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading averaging values");
     expect(screen.getByText(/Quota percentages are rounded/)).toBeInTheDocument();
   });
 
   it("keeps controls and reports failure without old-window values", () => {
     render(<WeeklyCreditsPaceCard pace={BASE_PACE} burnWindowMinutes={15} onBurnWindowChange={vi.fn()} error="failed" />);
-    expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh this averaging window");
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh averaging values");
     expect(screen.getByRole("button", { name: "3 h" })).toBeEnabled();
     expect(screen.queryByText("50%")).not.toBeInTheDocument();
   });

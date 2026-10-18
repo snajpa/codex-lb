@@ -12,6 +12,7 @@ from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
+from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
@@ -1702,6 +1703,13 @@ async def test_dashboard_selected_burn_window_contract(
     assert pace["burnRateRecentCreditsPerHour"] == pytest.approx(expected_rate)
     assert pace["forecastBurnRateCreditsPerHour"] == pytest.approx(expected_rate)
     assert pace["depletionEtaHours"] == pytest.approx(pace["headroomCredits"] / expected_rate)
+    if route == "projections":
+        windows = response.json()["weeklyCreditPaceWindows"]
+        assert set(windows) == {"5", "15", "60", "180"}
+        for window, expected in [(5, 6048), (15, 4032), (60, 1512), (180, 672)]:
+            assert windows[str(window)]["burnWindowMinutes"] == window
+            assert windows[str(window)]["burnRateRecentCreditsPerHour"] == pytest.approx(expected)
+        assert windows[str(minutes)] == pace
 
 
 @pytest.mark.asyncio
@@ -1826,3 +1834,43 @@ async def test_dashboard_accepts_quota_ingested_during_read(async_client, db_set
     assert payload["quotaBurn"]
     for burn in payload["quotaBurn"]:
         assert datetime.fromisoformat(burn["generatedAt"].replace("Z", "+00:00")).replace(tzinfo=None) == evaluated
+
+
+@pytest.mark.asyncio
+async def test_eager_weekly_windows_do_not_repeat_history_reads(async_client, db_setup, monkeypatch):
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("eager-pool", "eager@example.test", "pro"))
+        usage = UsageRepository(session)
+        for offset, percent in [(180, 10), (60, 11), (15, 12), (5, 13), (0, 14)]:
+            await usage.add_entry(
+                "eager-pool",
+                percent,
+                window="secondary",
+                window_minutes=10080,
+                reset_at=int(naive_utc_to_epoch(now + timedelta(hours=145))),
+                recorded_at=now - timedelta(minutes=offset),
+            )
+    counts = {
+        "bulk_usage_history_since": 0,
+        "positive_used_percent_deltas_by_account": 0,
+        "top_api_key_attribution_since": 0,
+        "get_settings": 0,
+    }
+    for name in counts:
+        original = getattr(DashboardRepository, name)
+
+        def count_call(method, label):
+            async def wrapped(self, *args, **kwargs):
+                counts[label] += 1
+                return await method(self, *args, **kwargs)
+
+            return wrapped
+
+        monkeypatch.setattr(DashboardRepository, name, count_call(original, name))
+    response = await async_client.get("/api/dashboard/projections")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["weeklyCreditPaceWindows"]["180"] == payload["weeklyCreditPace"]
+    assert all(value == 1 for value in counts.values()), counts

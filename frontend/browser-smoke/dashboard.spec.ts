@@ -613,21 +613,26 @@ test("weekly pace switches all averaging windows against the real backend", asyn
   const initialProjection = page.waitForResponse(response => new URL(response.url()).pathname === "/api/dashboard/projections");
   await page.goto("/dashboard", { waitUntil: "networkidle" });
   const initialResponse = await initialProjection;
+  const projections = DashboardProjectionsSchema.parse(await initialResponse.json());
+  expect(projections.weeklyCreditPaceWindows).toBeDefined();
+  const requests: string[] = [];
+  page.on("request", request => {
+    if (new URL(request.url()).pathname === "/api/dashboard/projections") requests.push(request.url());
+  });
   const controls = page.getByRole("group", { name: "Average over" });
   await expect(controls.getByRole("button", { name: "3 h", exact: true })).toHaveAttribute("aria-pressed", "true");
   for (const [label, minutes] of [["5 min", 5], ["15 min", 15], ["1 h", 60], ["3 h", 180]] as const) {
-    const received = minutes === 180 ? Promise.resolve(initialResponse) : page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return url.pathname === "/api/dashboard/projections" && Number(url.searchParams.get("burnWindowMinutes") ?? 180) === minutes;
-    });
+    const pace = projections.weeklyCreditPaceWindows![minutes];
+    expect(pace?.burnWindowMinutes).toBe(minutes);
+    expect(pace?.forecastBurnRateCreditsPerHour).toBe(pace?.burnRateRecentCreditsPerHour);
     await controls.getByRole("button", { name: label, exact: true }).click();
-    const response = await received;
-    expect(response.ok()).toBe(true);
-    const pace = (await response.json()).weeklyCreditPace;
-    expect(pace.burnWindowMinutes).toBe(minutes);
-    expect(pace.forecastBurnRateCreditsPerHour).toBe(pace.burnRateRecentCreditsPerHour);
     await expect(controls.getByRole("button", { name: label, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByText("Loading averaging values…", { exact: true })).toHaveCount(0);
+    if (pace?.burnRateRecentCreditsPerHour) {
+      await expect(page.getByText(`at ~${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(pace.burnRateRecentCreditsPerHour)}/h`, { exact: true })).toBeVisible();
+    }
   }
+  expect(requests).toHaveLength(0);
   await controls.getByRole("button", { name: "15 min", exact: true }).click();
   await page.reload({ waitUntil: "networkidle" });
   await expect(controls.getByRole("button", { name: "15 min", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -640,32 +645,48 @@ test("weekly pace switches all averaging windows against the real backend", asyn
   if (directory) await page.screenshot({ path: path.join(directory, "weekly-pace-mobile.png"), fullPage: true });
 });
 
-test("weekly pace ignores late windows and keeps controls usable after an error", async ({ page }) => {
-  await page.goto("/dashboard", { waitUntil: "networkidle" });
-  const controls = page.getByRole("group", { name: "Average over" });
+test("weekly pace honors clicks while its eager background values are pending", async ({ page }) => {
   let release!: () => void;
-  let started!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  const requested = new Promise<void>(resolve => { started = resolve; });
-  await page.route("**/api/dashboard/projections?burnWindowMinutes=5", async route => {
+  let requests = 0;
+  await page.route("**/api/dashboard/projections", async route => {
+    requests += 1;
     const response = await route.fetch();
-    started();
     await held;
     await route.fulfill({ response });
   });
+  await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+  const controls = page.getByRole("group", { name: "Average over" });
+  await expect.poll(() => requests).toBe(1);
   await controls.getByRole("button", { name: "5 min", exact: true }).click();
-  await requested;
-  const oneHour = page.waitForResponse(response => response.url().endsWith("/api/dashboard/projections?burnWindowMinutes=60"));
   await controls.getByRole("button", { name: "1 h", exact: true }).click();
-  expect((await oneHour).ok()).toBe(true);
+  await expect(page.getByText("Loading averaging values…", { exact: true })).toBeVisible();
   release();
+  await expect(page.getByText("Loading averaging values…", { exact: true })).toHaveCount(0);
   await expect(controls.getByRole("button", { name: "1 h", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await page.route("**/api/dashboard/projections?burnWindowMinutes=15", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: "unavailable" } }) }));
-  await controls.getByRole("button", { name: "15 min", exact: true }).click();
-  await expect(page.getByText("Could not refresh this averaging window. Select another window or retry.")).toBeVisible({ timeout: 15_000 });
-  await controls.getByRole("button", { name: "3 h", exact: true }).click();
-  await expect(controls.getByRole("button", { name: "3 h", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByText("Could not refresh this averaging window. Select another window or retry.")).toHaveCount(0);
+  await expect(page.getByTestId("weekly-runway-verdict")).toBeVisible();
+  expect(requests).toBe(1);
+});
+
+test("weekly pace recovers all cached windows after a shared background failure", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("codex-lb-dashboard-refresh-seconds", "5"));
+  let fail = true;
+  await page.route("**/api/dashboard/projections", async route => {
+    if (fail) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "probe", message: "unavailable" } }) });
+    else await route.continue();
+  });
+  await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+  const controls = page.getByRole("group", { name: "Average over" });
+  await controls.getByRole("button", { name: "5 min", exact: true }).click();
+  await expect(page.getByText("Could not refresh averaging values. Automatic refresh will retry.")).toBeVisible({ timeout: 20_000 });
+  fail = false;
+  await page.evaluate(() => { window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus")); });
+  await expect(page.getByText("Could not refresh averaging values. Automatic refresh will retry.")).toHaveCount(0, { timeout: 20_000 });
+  await expect(page.getByTestId("weekly-runway-verdict")).toBeVisible();
+  for (const label of ["15 min", "1 h", "3 h"]) {
+    await controls.getByRole("button", { name: label, exact: true }).click();
+    await expect(page.getByText("Loading averaging values…", { exact: true })).toHaveCount(0);
+  }
 });
 
 test("the built selectable card does not label a cumulative fallback as three hours", async ({ page }) => {
@@ -687,7 +708,7 @@ test("reset-aware runway renders later depletion and a conservative feasible loa
     await page.route(`**/api/dashboard/${endpoint}**`, async route => {
       const response = await route.fetch();
       const payload = await response.json();
-      await route.fulfill({ response, json: { ...payload, weeklyCreditPace: { ...payload.weeklyCreditPace,
+      await route.fulfill({ response, json: { ...payload, weeklyCreditPaceWindows: undefined, weeklyCreditPace: { ...payload.weeklyCreditPace,
         burnWindowMinutes: 180, burnRateRecentCreditsPerHour: 500, forecastBurnRateCreditsPerHour: 500,
         headroomCredits: 25200, headroomPercent: 50, depletionEtaHours: 50.4, projectedDepletionHours: 101.8,
         nextReliefInHours: 1, nextReliefCredits: 25700, runwayStatus: "runs_dry", throttleToPercent: 59.9999999,
@@ -706,7 +727,7 @@ test("reset-aware runway does not turn a no-reset ratio into actual exhaustion",
     await page.route(`**/api/dashboard/${endpoint}**`, async route => {
       const response = await route.fetch();
       const payload = await response.json();
-      await route.fulfill({ response, json: { ...payload, weeklyCreditPace: { ...payload.weeklyCreditPace,
+      await route.fulfill({ response, json: { ...payload, weeklyCreditPaceWindows: undefined, weeklyCreditPace: { ...payload.weeklyCreditPace,
         burnWindowMinutes: 180, burnRateRecentCreditsPerHour: 200, forecastBurnRateCreditsPerHour: 200,
         headroomCredits: 25200, headroomPercent: 50, depletionEtaHours: 126, projectedDepletionHours: null,
         runwayStatus: "safe", throttleToPercent: null,

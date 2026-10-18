@@ -72,7 +72,7 @@ describe("dashboard flow integration", () => {
     );
     const retainedPace = buildWeeklyCreditPace([known], new Date("2026-09-30T00:00:00Z"));
     if (!retainedPace) throw new Error("Missing retained forecast fixture");
-    queryClient.setQueryData(["dashboard", "projections", 180], createDashboardProjections({
+    queryClient.setQueryData(["dashboard", "projections", "all-windows"], createDashboardProjections({
       weeklyCreditPace: { ...retainedPace, paceGapSmoothingMinutes: 30 },
     }));
     server.use(
@@ -105,7 +105,7 @@ describe("dashboard flow integration", () => {
     if (!cumulativeEstimate) throw new Error("Missing cumulative estimate fixture");
     const overview = createDashboardOverview({ accounts: [account], weeklyCreditPace: null });
     const projections = createDashboardProjections({ weeklyCreditPace: { ...cumulativeEstimate, burnWindowMinutes: minutes, paceGapSmoothingMinutes: 30 } });
-    queryClient.setQueryData(["dashboard", "projections", minutes], projections);
+    queryClient.setQueryData(["dashboard", "projections", "all-windows"], projections);
     server.use(
       http.get("/api/dashboard/overview", () => HttpResponse.json(overview)),
       http.get("/api/dashboard/projections", () => HttpResponse.json(projections)),

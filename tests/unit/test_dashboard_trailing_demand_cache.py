@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import gc
 import time
 from datetime import datetime, timedelta
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -168,3 +170,87 @@ async def test_cache_evicts_oldest_entry_at_capacity(monkeypatch) -> None:
 
     assert len(dashboard_repository_module._trailing_demand_cache) == capacity
     assert len(usage_repo.calls) == capacity + 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_concurrent_cache_fill_queries_once(monkeypatch, expired: bool) -> None:
+    monkeypatch.setattr(dashboard_repository_module, "_TRAILING_DEMAND_TTL_SECONDS", 60.0)
+    key = (_WEEK_SECONDS, (("acc_a", "secondary"),))
+    if expired:
+        dashboard_repository_module._trailing_demand_cache[key] = ({"acc_a": -1}, time.monotonic() - 1)
+    repo, usage = _repo()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def fetch(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return {"acc_a": 12.5}
+
+    fetch_mock = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(usage, "positive_used_percent_deltas_by_account", fetch_mock)
+    first = asyncio.create_task(repo.positive_used_percent_deltas_by_account({"acc_a": "secondary"}, **_WINDOW))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = asyncio.create_task(repo.positive_used_percent_deltas_by_account({"acc_a": "secondary"}, **_WINDOW))
+        await asyncio.sleep(0)
+        assert fetch_mock.await_count == 1
+        release.set()
+        assert await first == await second == {"acc_a": 12.5}
+        assert fetch_mock.await_count == 1
+        assert not dashboard_repository_module._trailing_demand_locks
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (first, second) if t is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+async def test_failed_cache_fill_releases_waiter_without_caching_partial_result(monkeypatch, failure: str) -> None:
+    monkeypatch.setattr(dashboard_repository_module, "_TRAILING_DEMAND_TTL_SECONDS", 60.0)
+    repo, usage = _repo()
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def fetch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+            raise RuntimeError("read failed")
+        return {"acc_a": 12.5}
+
+    monkeypatch.setattr(usage, "positive_used_percent_deltas_by_account", fetch)
+    first = asyncio.create_task(repo.positive_used_percent_deltas_by_account({"acc_a": "secondary"}, **_WINDOW))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = asyncio.create_task(repo.positive_used_percent_deltas_by_account({"acc_a": "secondary"}, **_WINDOW))
+        await asyncio.sleep(0)
+        assert calls == 1
+        assert not dashboard_repository_module._trailing_demand_cache
+        if failure == "cancel":
+            first.cancel()
+        else:
+            release.set()
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+            await first
+        assert await asyncio.wait_for(second, timeout=1) == {"acc_a": 12.5}
+        assert calls == 2
+        # Failed tasks retain the read frame through their exception traceback.
+        # Release that finished task before checking idle lock reclamation.
+        first = None
+        await asyncio.sleep(0)
+        gc.collect()
+        assert not dashboard_repository_module._trailing_demand_locks
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (first, second) if t is not None), return_exceptions=True)
