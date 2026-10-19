@@ -4275,13 +4275,13 @@ The dashboard SHALL retain the upstream StatsGrid, usage-donut and WeeklyCredits
 - **AND** every account row can be reached through ordinary document scrolling
 
 ### Requirement: Weekly credit burn averaging controls
-The weekly credit pace card MUST offer accessible 1 min, 15 min, 1 h and 3 h
+The weekly credit pace card MUST offer accessible 5 min, 15 min, 1 h and 3 h
 buttons directly in the card, defaulting to 3 h and remembering the choice in
 browser-local preferences. Selection MUST update burn, runway and rate-dependent
 recommendations together without changing other dashboard timeframes or settings.
 
 #### Scenario: Switching while a request is pending
-- **WHEN** the operator switches from 3 h to 1 min and then to 15 min
+- **WHEN** the operator switches from 3 h to 5 min and then to 15 min
 - **THEN** the controls remain available
 - **AND** only a response for 15 min may populate the selected card
 - **AND** loading or failure MUST NOT relabel old-window values as 15 min
@@ -4296,3 +4296,21 @@ recommendations together without changing other dashboard timeframes or settings
 - **WHEN** the current overview explicitly reports unavailable pace
 - **THEN** the selectable card MUST preserve that unavailable state for every averaging window
 - **AND** MUST NOT substitute a cumulative-week local estimate or retained projection under the 3 h label
+
+#### Scenario: Retained one-minute preference
+- **WHEN** the browser has a persisted one-minute averaging selection
+- **THEN** the dashboard MUST select and persist five minutes instead
+- **AND** an unset preference MUST still default to three hours
+
+#### Scenario: Reset-aware depletion versus a counterfactual
+- **WHEN** the server supplies reset-aware projection metadata
+- **THEN** the card MUST display that modeled depletion time, or no depletion in the modeled horizon
+- **AND** legacy no-reset ETAs MUST be explicitly qualified when projection metadata is absent
+- **AND** any displayed recommended load MUST be rounded down, never above the feasible load
+
+#### Scenario: Every window is ready before its button is clicked
+- **WHEN** the dashboard loads its background projections
+- **THEN** it MUST eagerly cache values for all four averaging windows
+- **AND** selecting an already-loaded window MUST update its values immediately without a new request or loading flash
+- **AND** a selection made while the shared request is pending MUST be honored when it completes
+- **AND** refresh and failure MUST preserve correct window identity and the existing polling/hidden-tab policy

@@ -279,7 +279,7 @@ uncached input MUST be labelled hypothetical, not billed cost or subscription sp
 
 ### Requirement: Consistent selectable weekly quota burn
 Dashboard overview and projections MUST accept `burnWindowMinutes` with integer
-values 1, 15, 60 or 180, default to 180 when omitted, reject other values, and
+values 5, 15, 60 or 180, default to 180 when omitted, reject other values, and
 report the selected window in weekly credit pace metadata. One elapsed-time
 average for that window MUST drive displayed burn, depletion ETA, shortfall
 simulation and rate-dependent recommendations.
@@ -289,8 +289,8 @@ simulation and rate-dependent recommendations.
 - **THEN** the selected-window average MUST NOT decay with the sample count
 - **AND** forecast burn MUST equal displayed burn rather than decay per sample
 
-#### Scenario: One-minute averaging
-- **WHEN** the operator selects one minute
+#### Scenario: Five-minute averaging
+- **WHEN** the operator selects five minutes
 - **THEN** the rate MUST use observed quota changes in that interval, with
   boundary interpolation when an observation spans its start
 - **AND** its denominator MUST NOT be padded to thirty minutes
@@ -305,3 +305,66 @@ simulation and rate-dependent recommendations.
 - **WHEN** every observed interval crosses a quota decrease, real reset or duration change
 - **THEN** that account's rate and the complete-fleet rate MUST be unknown, not measured zero
 - **AND** no depletion ETA or rate-dependent recommendation may use a partial-fleet rate
+
+#### Scenario: Retired one-minute HTTP query
+- **WHEN** either dashboard route receives `burnWindowMinutes=1`
+- **THEN** it MUST reject the query with HTTP 422 rather than relabel another interval
+
+#### Scenario: One-minute averaging
+- **WHEN** a client uses the retired one-minute interval
+- **THEN** the HTTP query MUST be rejected with 422
+- **AND** a persisted browser preference of 1 MUST migrate to 5 minutes
+
+#### Scenario: Skipped reset gaps are not zero consumption
+- **WHEN** a discontinuous history interval is excluded from its quota delta
+- **THEN** its duration MUST also be excluded from measured coverage
+- **AND** the existing selected-window sparse-data floor MUST still apply
+- **AND** an unusable latest interval MUST produce unknown rather than a pre-reset zero
+
+### Requirement: Reset-aware weekly runway and feasible load
+The weekly pace verdict and actual depletion display MUST use the selected burn
+rate and all eligible balances and resets over two longest quota windows.
+`depletionEtaHours` MUST remain the no-reset remaining/rate counterfactual for
+compatibility. `projectedDepletionHours` MUST represent actual modeled depletion.
+A throttle recommendation MUST be feasible through that same model horizon,
+with a conservatively rounded display, not merely equal to nominal weekly supply.
+
+#### Scenario: Remaining credits constrain throttling
+- **GIVEN** 5040 credits remain, the next refill is in 100 hours, and burn is 1008 credits/hour
+- **WHEN** a load reduction is recommended
+- **THEN** the modeled load MUST NOT exceed 50.4 credits/hour or 5 percent of current load
+
+#### Scenario: Earlier relief outside the saturated cohort
+- **GIVEN** a less-saturated account refills before the saturated cohort
+- **WHEN** those earlier credits prevent modeled depletion
+- **THEN** the verdict MUST NOT claim the pool runs dry before relief
+
+#### Scenario: Depletion after an early reset
+- **WHEN** the first reset arrives before the no-reset ETA but the pool depletes later in the horizon
+- **THEN** the verdict MUST report runs dry and the card MUST show that later modeled depletion
+- **AND** it MUST NOT say the first relief arrives after depletion
+
+#### Scenario: Expired and future quota observations
+- **WHEN** an eligible balance belongs to an already elapsed reset cycle or a future observation
+- **THEN** complete-fleet pace MUST be unavailable rather than advancing that balance into a new cycle
+
+#### Scenario: Quota ingestion overlaps a dashboard read
+- **WHEN** a valid quota observation is committed after request start but before quota reads finish
+- **THEN** the route MUST evaluate pace against the completed-read clock, not reject ordinary ingestion as future data
+- **AND** percentage-burn generatedAt MUST use that same evaluation instant
+
+### Requirement: Eager weekly pace windows share one history read
+Dashboard projections MUST include weeklyCreditPaceWindows keyed by 5, 15, 60
+and 180 minutes. Every entry MUST use the same loaded history, settings, demand
+and evaluation clock; unavailable pace MUST be explicit null. The existing
+weeklyCreditPace MUST remain the requested window's value, defaulting to 180.
+History, trailing demand and API-key attribution MUST NOT be queried per window.
+
+#### Scenario: Default projection eagerly supplies every window
+- **WHEN** a client requests projections without a burnWindowMinutes query
+- **THEN** it MUST receive the values for all four averaging windows
+- **AND** weeklyCreditPace MUST equal the 180-minute map entry
+
+#### Scenario: Explicit query remains compatible
+- **WHEN** a client requests projections for 15 minutes
+- **THEN** weeklyCreditPace MUST equal the 15-minute entry from the same four-window map
