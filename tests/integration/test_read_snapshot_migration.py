@@ -7,6 +7,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -160,7 +161,9 @@ def test_read_snapshot_retry_refuses_existing_incompatible_column_type(migration
 
 
 @pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
-@pytest.mark.parametrize("layout", ["default", "unique", "foreign-key", "check", "extra-index", "column-type"])
+@pytest.mark.parametrize(
+    "layout", ["default", "unique", "foreign-key", "check", "extra-index", "column-type", "generated"]
+)
 def test_read_snapshot_migration_refuses_alien_layout_without_deleting_rows(migration_url, direction, layout):  # noqa: F811
     revision = _PARENT if direction == "upgrade" else _REVISION
     run_upgrade(migration_url, revision, bootstrap_legacy=False)
@@ -177,6 +180,10 @@ def test_read_snapshot_migration_refuses_alien_layout_without_deleting_rows(migr
             table.append_constraint(CheckConstraint("generation >= 0", name="alien_generation_check"))
         elif layout == "extra-index":
             Index("alien_kind_index", table.c.kind)
+        elif layout == "generated":
+            table.c.payload_json.computed = Computed("'alien generated payload'", persisted=False)
+            table.c.payload_json.server_default = table.c.payload_json.computed
+            table.c.payload_json.server_onupdate = table.c.payload_json.computed
         else:
             table.c.payload_json.type = Integer()
         with engine.begin() as connection:
