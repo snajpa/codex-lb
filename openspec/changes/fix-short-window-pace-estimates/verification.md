@@ -47,7 +47,14 @@ Before selection, an unused candidate was safely stopped and restarted. Seven
 published generation/payload hashes stayed identical while it was stopped and on
 authenticated reads after restart. Both exact immutable artifacts also passed real
 application lifespans against the shared qualification database. That does not yet
-prove two new production replicas or a host-power-failure recovery. The unselected
+prove two new production replicas or a host-power-failure recovery. A further
+real two-worker qualification killed and joined its owned leader, observed natural
+lease-expiry takeover, preserved exact last-good report payloads on collector
+failure, and restarted all workers without losing persistent generations or the
+accounting control row. Separately, 34 authenticated reads on the selected new
+production replica matched every business field of its persistent dashboard and
+report bundles across the required ranges, averaging windows, and admitted zones.
+Those single-replica reads are not a two-new-production-replica claim. The unselected
 prior replica still owns connections and remains protected; its replacement waits
 for natural idle and the fenced retirement checks. No active client was forcibly
 disconnected. A synthetic encrypted-context exchange across backends does not prove
@@ -55,10 +62,15 @@ every native client can reconnect with process-local previous-response state int
 
 Cloud PostgreSQL tests and all three database migration checks now pass. Cloud
 frontend, browser, end-to-end, integration-bridge and first core-shard checks also
-pass. Current unit failures exactly match the eleven failures on the earlier base;
-all 132 reported type diagnostics are also present on that base (134 there). The
-third core shard retains the same model-source failure, and four second-shard retry
-seams are inherited. A further introduced compaction fixture still expected an
+pass. Current unit failures exactly match the eleven failures on the earlier base.
+A stricter diagnostic-location comparison corrected an earlier classification:
+130 of 132 reported type diagnostics match that base, but two were introduced in
+the existing pace-test helper by its untyped expanded keyword dictionary. An exact
+optional-key TypedDict now fixes those diagnostics without changing application
+code, omitting-default behavior, or assertions; focused typing, formatting, lint,
+and all 47 pace tests pass, with a separate source-only review finding no action.
+The third core shard retains the same model-source failure, and four second-shard
+retry seams are inherited. A further introduced compaction fixture still expected an
 immediately computed dashboard after account-state mutation: it now explicitly
 runs the real producer outside HTTP, preserving all native failover assertions and
 checking fresh/error-free snapshot state. That focused fixture passes on SQLite

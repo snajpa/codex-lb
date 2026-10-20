@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import cast
+from typing import TypedDict, cast
 
 import pytest
 from sqlalchemy import Table
@@ -65,6 +65,10 @@ def _three_hour_history(account_id: str, *, final_used_percent: float, hourly_de
     return [_row(account_id, value, NOW - timedelta(minutes=offset)) for value, offset in zip(values, offsets)]
 
 
+class _BurnWindowArguments(TypedDict, total=False):
+    burn_window_minutes: WeeklyPaceWindowMinutes
+
+
 def _build(
     summaries: list[AccountSummary],
     histories: dict[str, list[UsageHistory]],
@@ -72,7 +76,9 @@ def _build(
     trailing_demand_used_percent_by_account: dict[str, float] | None = None,
     burn_window_minutes: WeeklyPaceWindowMinutes | None = None,
 ):
-    window_argument = {} if burn_window_minutes is None else {"burn_window_minutes": burn_window_minutes}
+    window_argument: _BurnWindowArguments = (
+        {} if burn_window_minutes is None else {"burn_window_minutes": burn_window_minutes}
+    )
     pace = build_weekly_credit_pace(
         accounts=[_account(summary.account_id) for summary in summaries],
         account_summaries=summaries,
