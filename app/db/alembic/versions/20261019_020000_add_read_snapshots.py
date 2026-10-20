@@ -54,6 +54,8 @@ def _validate_existing(inspector: sa.Inspector, columns: list[sa.Column]) -> boo
             )
         if (
             existing[name]["nullable"] != column.nullable
+            or existing[name].get("computed") is not None
+            or existing[name].get("identity") is not None
             or op.get_context().impl.compare_type(sa.Column(name, existing[name]["type"]), column)
             or _normalized_default(existing[name]["default"]) != _normalized_default(default)
         ):
