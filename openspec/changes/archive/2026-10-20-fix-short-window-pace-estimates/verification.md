@@ -1,5 +1,23 @@
 # Verification checkpoint — October 20, 2026
 
+## Summary
+
+| Dimension | Result |
+| --- | --- |
+| Completeness | 10/10 tasks; three delta requirements implemented |
+| Correctness | Seven scenarios covered by regressions and numerical/API/built-browser checks |
+| Coherence | Bounded owned query, exact window identity, truthful coverage and version fencing follow the design |
+
+The traffic estimate is implemented in `app/modules/dashboard/traffic_pace.py`,
+its repository/service/weekly-pace integration and the existing dashboard card;
+`tests/unit/test_traffic_pace.py` and
+`tests/integration/test_dashboard_traffic_pace.py` cover calibration, resets,
+unknown work and longer-window preservation. The shared query and mixed-version
+admission are covered by the read-snapshot integration tests; the migration cases
+exercise real PostgreSQL literal defaults, retry, downgrade and alien-layout refusal.
+No critical implementation or rollout issue remains in these scoped requirements.
+The broader inherited cloud failures below are not waived.
+
 ## Established behavior
 
 The real incident reproduced hundreds of requests in five minutes while fresh
@@ -46,7 +64,7 @@ also passed on the normal endpoint.
 Before selection, an unused candidate was safely stopped and restarted. Seven
 published generation/payload hashes stayed identical while it was stopped and on
 authenticated reads after restart. Both exact immutable artifacts also passed real
-application lifespans against the shared qualification database. That does not yet
+application lifespans against the shared qualification database. Those checks alone do not
 prove two new production replicas or a host-power-failure recovery. A further
 real two-worker qualification killed and joined its owned leader, observed natural
 lease-expiry takeover, preserved exact last-good report payloads on collector
@@ -54,11 +72,21 @@ failure, and restarted all workers without losing persistent generations or the
 accounting control row. Separately, 34 authenticated reads on the selected new
 production replica matched every business field of its persistent dashboard and
 report bundles across the required ranges, averaging windows, and admitted zones.
-Those single-replica reads are not a two-new-production-replica claim. The unselected
-prior replica still owns connections and remains protected; its replacement waits
-for natural idle and the fenced retirement checks. No active client was forcibly
-disconnected. A synthetic encrypted-context exchange across backends does not prove
-every native client can reconnect with process-local previous-response state intact.
+Those earlier single-replica reads were not a two-new-production-replica claim.
+The operator subsequently authorized client disconnection and reconnection. Only the
+old replica's 27 exact ownership-fenced sockets were closed, then actual in-flight,
+cleanup and durable ownership were allowed to settle before its fenced retirement.
+The selected replica was not restarted or disconnected. Its qualified standby was
+installed through the journaled cold-member controls, without live DDL or a third
+backend. Both new production replicas passed 68 complete persisted-business-payload
+comparisons before and 68 after the unused standby's safe restart. All seven
+published generation/payload hashes stayed identical before, while stopped and
+after restart. Final inference and analytical readiness were healthy on both
+replicas and the normal endpoint. This proves shared production reads and standby
+restart persistence, not an actual production power failure or universal client
+context continuity. The standby separately passed actual private-client TLS,
+assets, all windows, a real built browser and native tool/result plus isolated
+encrypted-compaction continuation checks.
 
 Cloud PostgreSQL tests and all three database migration checks now pass. Cloud
 frontend, browser, end-to-end, integration-bridge and first core-shard checks also
@@ -69,6 +97,10 @@ the existing pace-test helper by its untyped expanded keyword dictionary. An exa
 optional-key TypedDict now fixes those diagnostics without changing application
 code, omitting-default behavior, or assertions; focused typing, formatting, lint,
 and all 47 pace tests pass, with a separate source-only review finding no action.
+The corrected head's actual cloud typing log now reports 128 diagnostics, all
+matching the earlier base by header, location and multiplicity; the two introduced
+pace-helper diagnostics are gone. This does not restore the earlier incorrect
+claim that the preceding head's 132 diagnostics were all inherited.
 The third core shard retains the same model-source failure, and four second-shard
 retry seams are inherited. A further introduced compaction fixture still expected an
 immediately computed dashboard after account-state mutation: it now explicitly
@@ -77,5 +109,9 @@ checking fresh/error-free snapshot state. That focused fixture passes on SQLite
 and MariaDB and received a separate source-only review with no actionable findings.
 No application code changed for this fixture correction. Broader native complexity,
 security/dependency and test seams remain separate; no full cloud-CI-green or full
-MySQL claim follows. Archive only after the outstanding two-new-replica rollout
-evidence exists.
+MySQL claim follows. The full MySQL run completed with 2,161 passes, 50 skips,
+six failures and one setup error, with all failure/error names exactly matching
+the earlier base. This compares names, not a guarantee of identical causes.
+The two-new-replica rollout, shared reads, persistence and
+matched fork publication are now verified; archive preserves the evidence and
+these explicit limits.

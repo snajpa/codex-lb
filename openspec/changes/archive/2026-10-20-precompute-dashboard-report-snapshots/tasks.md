@@ -17,4 +17,4 @@
 - [x] Prove cancellation/lease-loss/partial-failure/restart and bounded query behavior.
 - [x] Run scoped backend/frontend/real-MariaDB/build/browser/spec checks and review.
 - [x] Qualify immutable deployment, cached normal-address reads and forty-session coexistence.
-- [ ] Publish matched fork source, preserve rollback and archive only verified work.
+- [x] Publish matched fork source, preserve rollback and archive only verified work.

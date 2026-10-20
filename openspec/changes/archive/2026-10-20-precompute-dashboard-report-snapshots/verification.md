@@ -1,13 +1,13 @@
 # Verification — background analytical snapshots
 
-Checkpoint: October 20, 2026. This records qualified application behavior, not a
-claim that every production replica has already been replaced.
+Final checkpoint: October 20, 2026. Both production replicas now run the qualified
+application. The selected replica stayed running throughout standby replacement.
 
 ## Scorecard
 
 | Dimension | Result |
 | --- | --- |
-| Completeness | 14/15 tasks; final publication/rollback/archive closure remains open |
+| Completeness | 15/15 tasks; matched fork source, two-new-replica rollout and restart closure verified |
 | Correctness | All 10 delta requirements have implementation and regression coverage; 26 scenarios reviewed |
 | Coherence | Durable read model, independent fenced lease, owned bounded lanes, existing rollup reuse and explicit coverage follow the design |
 
@@ -140,19 +140,41 @@ and 61 real MariaDB cases. The five additional fixture scenarios passed both
 SQLite and MariaDB. This follow-up changes no served application, schema,
 provider, native transport, dependency or configuration input.
 
-The already-published migration still has one introduced default-clause typing
-diagnostic and a real PostgreSQL existing-layout rejection. Project policy forbids
-editing merged migrations; operator direction is pending before any correction.
-Do not describe these as inherited failures or claim PostgreSQL compatibility
-qualified. The live MariaDB producer and restart/browser/numerical/native results
-above remain separate, valid observations; they are not a substitute for resolving
-the PostgreSQL defect. No full-suite green or archive claim is made.
+The operator explicitly approved the narrow already-published migration source
+correction. Equivalent PostgreSQL literal casts and the DefaultClause type are now
+handled without changing revision, parent or intended DDL. The correction passed
+53 focused real PostgreSQL cases and the full cloud PostgreSQL suite, plus all three
+migration checks. No live DDL was needed for this source-only correction.
 
-## Critical closure item — do not archive yet
+## Final two-replica closure
 
-The final task remains open. The application-matching fork source is published.
-Resolve introduced CI findings, finish the protected two-replica rolling replacement
-and preserve its qualified rollback record before archiving. Existing protected client owners on the old
-replica must not be killed to manufacture an idle proof or to start a third backend.
-The new worker and selected endpoint are delivered; this does not imply the second
-new production replica or a host power-failure exercise is already complete.
+The operator authorized disconnection of the prior replica's clients so they could
+reconnect. Only that replica's 27 ownership-fenced socket tuples were closed; the
+selected replica and peer client processes were untouched. Remaining admitted work
+was allowed to finish. Zero sockets, in-flight requests, cleanup and durable work
+were verified before the normal fenced retirement, heartbeat expiry and journaled
+cold replacement. This was an authorized interruption of old connections, not a
+claim of uninterrupted service for every client or universal previous-response
+continuity.
+
+Both new production replicas then passed 68 complete authenticated business-payload
+comparisons against the same persisted dashboard/report values, before and after an
+unused-standby restart. All seven published payload hashes and generations remained
+identical before, while stopped and after restart. Both instances have matching
+immutable application inputs and the same healthy two-member ring. The standby's
+real built-browser, independent numerical, native tool/result and isolated encrypted
+compaction checks passed; actual private-client TLS, assets and all windows passed.
+The selected replica was not restarted. These prove shared production reads and
+standby restart persistence; the abrupt leader-loss/takeover experiment remains an
+owned two-worker qualification, not an actual production host-power-failure test.
+
+The five-minute rounded-counter correction and its separate tests are verified in
+`../2026-10-20-fix-short-window-pace-estimates/verification.md`. Its latest cloud typing result
+contains 128 diagnostics matching the earlier base by header, location and
+multiplicity, with no remaining pace-helper diagnostics. Existing baseline failures
+remain disclosed. The full MySQL cloud run completed with 2,161 passes, 50 skips,
+six failures and one setup error; all seven failure/error names exactly match the
+earlier base. This name-level comparison does not prove all causes are identical.
+No full-cloud-green or full-MySQL-pass claim is made. The qualified application is
+published on the authorized fork's main and feature branches; completion docs do
+not modify served application, dependencies, configuration or immutable manifests.

@@ -8,6 +8,6 @@
 
 ## Deliver
 - [x] Qualify new immutable artifacts and private-client candidate reachability.
-- [ ] Roll safely, verify normal-address/native/forty-session behavior and shared reads.
+- [x] Roll safely, verify normal-address/native/forty-session behavior and shared reads.
 - [x] Publish matching fork main and feature source and sync specs.
-- [ ] Archive only after the remaining two-new-replica rollout evidence exists.
+- [x] Archive only after the remaining two-new-replica rollout evidence exists.
