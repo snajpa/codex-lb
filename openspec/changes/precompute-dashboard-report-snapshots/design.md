@@ -1,5 +1,9 @@
 # Design
 
+Historical measurement and preparation checkpoints below are chronological context,
+not the current deployment state. See `verification.md` for the qualified behavior
+and remaining operational closure; private deployment controls are not published.
+
 ## Contracts and ownership
 A completed snapshot is a value, not an expiring permission to compute on the
 request task. Persist normalized keys, payload/version, generation/as-of time,

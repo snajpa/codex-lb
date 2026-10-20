@@ -76,3 +76,29 @@ If overview, projections, and request-log options return successfully while the 
 ### Testing notes
 
 The product-boundary regression renders the real `/dashboard` App route with the production query retry policy and MSW handlers. It counts each request family, seeds unique values for a statistic, quota surface, projection metric, and account control, focuses and keyboard-activates native Retry, holds the recovered listing response pending long enough to assert all healthy surfaces remain mounted, and then verifies the recovered row.
+
+## Prepared analytical views
+
+Dashboard and Reports distinguish cache preparation from actual data coverage.
+The page uses exact query identities and shared server generations, keeps usable
+same-key last-good values during refresh, and shows generated-at/stale/failure
+metadata. Changing a window is not a new sample-collection period, and changing
+filters or dates cannot label a prior response as the new result.
+
+For example, the dashboard receives all four averaging choices before the first
+selection click; five-minute selection and reload use the published five-minute
+member. Cold report reads show preparation and retry cheaply; unavailable older
+speed diagnostics remain a separate, disclosed coverage state.
+
+Dashboard HTTP/1.x responses close their connection after completion so future
+atomic switches cannot leave browser pools pinned to a retired generation.
+Inference, internal bridge, health, metrics, SCIM, HTTP/2 and WebSocket behavior
+is unchanged. A predecessor without this response policy still requires a real
+retained-browser audit; only proven UI-only connections may be reconnected,
+never arbitrary or inference sockets.
+
+Qualification separates real retained-TCP evidence from a later five-minute
+built-page test. A failed response-body capture during navigation is not a
+successful continuous-browser test. The normal-address cadence check verifies a
+new automatic generation and no selection-triggered HTTP calculation; transport
+and native coexistence are checked separately. See [`spec.md`](./spec.md).

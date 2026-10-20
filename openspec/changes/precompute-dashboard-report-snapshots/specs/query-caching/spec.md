@@ -68,7 +68,7 @@ inference readiness endpoint fail.
 The read-snapshot migration SHALL support retry after creating its table but
 before completing its index or revision publication, and its downgrade SHALL
 support retry after removing the derived table but before revision publication.
-Unexpected existing columns, defaults, indexes or constraints SHALL fail closed,
+Unexpected existing columns, generated expressions, defaults, indexes or constraints SHALL fail closed,
 including before a downgrade removes an existing table. Neither retry SHALL
 modify existing accounting, quota, request-history, scheduler or bridge rows.
 
@@ -83,3 +83,7 @@ modify existing accounting, quota, request-history, scheduler or bridge rows.
 #### Scenario: An existing table has an unexpected constraint or default
 - **WHEN** upgrade or downgrade encounters that table
 - **THEN** it SHALL refuse before changing its contents, schema or revision
+
+#### Scenario: A generated payload column imitates the expected storage type
+- **WHEN** upgrade or downgrade encounters a computed payload column instead of writable snapshot storage
+- **THEN** it SHALL refuse without stamping the revision or removing the unexpected table

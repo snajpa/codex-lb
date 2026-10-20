@@ -77,3 +77,31 @@ usage_history(window='primary', account_id='acc_1', recorded_at='2026-03-08T11:0
 ```
 
 `latest_by_account("primary")` should return only the later row while still treating both rows as part of the same logical primary window.
+
+## Persistent analytical read models
+
+The dashboard and report read model is a durable published value, not a cache
+permission to run a collector. The independent analytical lease owns separate,
+sequential dashboard and report lanes with fresh sessions. Bounded normalized
+interest admits uncommon filters and viewer timezones; canonical presets keep
+reserved capacity. No new external cache or required configuration is involved.
+
+The dashboard producer computes all four averaging windows and overview ranges
+from one owned context. HTTP reads select a published member; expired values
+remain available with their original evaluation clock and stale/error metadata.
+Cold reads report preparation explicitly rather than zero data. Lease loss and
+shutdown cancel/join collectors before releasing their owned sessions, and an
+old producer cannot replace a newer complete publication.
+
+For example, reloading a five-minute choice reads the same complete generation
+until the next background publication. It neither starts quota sampling nor
+relabels a three-hour value as five minutes. Different filters or dates have
+separate identities. The analytical readiness endpoint checks bounded metadata,
+not stored payloads or history, independently of inference infrastructure health.
+
+MariaDB/MySQL projection reads apply the existing older-tail cap in SQL while
+retaining every row at or after the recent floor. This reduces transfer without
+changing selected observations. The additive derived-table migration validates
+unexpected layouts, including generated columns, before retry or downgrade;
+old binaries require a compatible migration-aware rollback rather than ignoring
+an unknown schema head. See [`spec.md`](./spec.md) for the normative contracts.
