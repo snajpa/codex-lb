@@ -1,3 +1,5 @@
+import { ReadSnapshotStatus } from "@/components/read-snapshot-status";
+import { isSnapshotWarming } from "@/schemas/read-snapshot";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -377,7 +379,9 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses, t],
   );
 
-  const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
+  const dashboardWarming = isSnapshotWarming(dashboardQuery.error);
+  const projectionsWarming = isSnapshotWarming(projectionsQuery.error);
+  const dashboardLoadError = dashboardWarming ? null : getErrorMessageOrNull(dashboardQuery.error);
   if (
     retainedDashboardLoadError !== null &&
     (overview || retainedDashboardLoadError.timeframe !== dashboardTimeframe)
@@ -442,9 +446,10 @@ export function DashboardPage() {
         </div>
       </div>
 
+      <ReadSnapshotStatus snapshot={overview?.snapshot} warming={dashboardWarming} />
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
+      {(dashboardQuery.isPending || dashboardQuery.isFetching || dashboardWarming) &&
       !view &&
       displayedDashboardLoadError === null ? (
         <DashboardSkeleton />
@@ -506,8 +511,10 @@ export function DashboardPage() {
                 pace={selectedWeeklyPace}
                 burnWindowMinutes={burnWindowMinutes}
                 onBurnWindowChange={setBurnWindowMinutes}
-                isLoading={projectionsQuery.isPending}
-                error={getErrorMessageOrNull(projectionsQuery.error)}
+                isLoading={projectionsQuery.isPending || projectionsWarming}
+                error={projectionsQuery.data?.windowCompatible === false
+                  ? t("readSnapshot.incompatible")
+                  : projectionsWarming ? null : getErrorMessageOrNull(projectionsQuery.error)}
               />
             </div>
           ) : (

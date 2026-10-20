@@ -1,3 +1,4 @@
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import { get } from "@/lib/api-client";
 
 import {
@@ -61,12 +62,12 @@ export function getDashboardOverview(params: DashboardOverviewParams = {}) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
   if (params.burnWindowMinutes != null) query.set("burnWindowMinutes", String(params.burnWindowMinutes));
-  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
+  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema, { headers: reportsTimezoneHeaders() });
 }
 
 export function getDashboardProjections(burnWindowMinutes: WeeklyPaceWindowMinutes = 180) {
   const query = burnWindowMinutes === 180 ? "" : `?burnWindowMinutes=${burnWindowMinutes}`;
-  return get(`${DASHBOARD_PATH}/projections${query}`, DashboardProjectionsSchema);
+  return get(`${DASHBOARD_PATH}/projections${query}`, DashboardProjectionsSchema, { headers: reportsTimezoneHeaders() });
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {
@@ -153,4 +154,13 @@ export function getConversationDetails(conversationId: string) {
     : conversationId;
   const encoded = encodeURIComponent(opaqueId);
   return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
+}
+
+function reportsTimezoneHeaders(): Record<string, string> {
+  try {
+    const zone = getBrowserReportsTimeZone();
+    return zone ? { "X-Reports-Timezone": zone } : {};
+  } catch {
+    return {}; // An unavailable preference hint cannot fail a prepared dashboard read.
+  }
 }

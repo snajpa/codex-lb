@@ -1076,8 +1076,8 @@ class UsageRepository:
         their own per-account trimming.
 
         ``per_account_row_cap`` additionally bounds each account's slice to
-        its newest rows inside the cutoff (supported on both PostgreSQL and
-        SQLite). Live snapshot ingestion appends usage rows per proxied request,
+        its newest rows inside the cutoff (supported on PostgreSQL, MySQL/MariaDB
+        and SQLite). Live snapshot ingestion appends usage rows per proxied request,
         so a busy account's 7-day window can hold tens of thousands of rows
         while the projection consumers (EWMA depletion, weekly-pace burn/smoothing)
         only read the recent tail. Each capped slice keeps oldest-first ordering.
@@ -1089,7 +1089,7 @@ class UsageRepository:
         weekly-pace smoothing mean) pass their window start here so a
         write-rate burst can never silently truncate that window, while
         tail-weighted consumers (EWMA) stay covered by the cap alone.
-        Honored whenever ``per_account_row_cap`` is set on PostgreSQL or SQLite.
+        Honored whenever ``per_account_row_cap`` is set on PostgreSQL, MySQL/MariaDB or SQLite.
         """
         if not account_ids:
             return {}
@@ -1116,6 +1116,16 @@ class UsageRepository:
                 list(account_ids),
                 window,
                 since,
+            )
+
+        if per_account_row_cap is not None and is_mysql(dialect):
+            return await self._bulk_history_since_capped_mysql(
+                account_ids,
+                window,
+                since,
+                cutoffs=cutoffs,
+                per_account_row_cap=per_account_row_cap,
+                uncapped_recent_floor=uncapped_recent_floor,
             )
 
         if per_account_row_cap is not None and dialect == "postgresql":
@@ -1185,6 +1195,69 @@ class UsageRepository:
                     capped_grouped[account_id] = capped_tail + recent
             return capped_grouped
 
+        return grouped
+
+    async def _bulk_history_since_capped_mysql(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None,
+        per_account_row_cap: int,
+        uncapped_recent_floor: datetime | None,
+    ) -> dict[str, list[UsageHistorySnapshot]]:
+        """Bound indexed probes without a lateral-join requirement on MariaDB.
+
+        The previous fallback fetched every older row and applied this identical
+        selection in Python. Keep the recent branch complete and disjoint from
+        the top-N older tail. Batches bound SQL size; no sessions/tasks fan out.
+        """
+        snapshot_columns = (
+            UsageHistory.id,
+            UsageHistory.account_id,
+            UsageHistory.used_percent,
+            UsageHistory.recorded_at,
+            UsageHistory.reset_at,
+            UsageHistory.window_minutes,
+        )
+        grouped: dict[str, list[UsageHistorySnapshot]] = {}
+        for offset in range(0, len(account_ids), 64):
+            branches = []
+            for account_id in account_ids[offset : offset + 64]:
+                cutoff = max(since, cutoffs.get(account_id, since)) if cutoffs else since
+                floor = max(cutoff, uncapped_recent_floor) if uncapped_recent_floor is not None else None
+                base = select(*snapshot_columns).where(
+                    UsageHistory.account_id == account_id,
+                    _window_clause(window),
+                )
+                if per_account_row_cap > 0:
+                    tail = base.where(UsageHistory.recorded_at >= cutoff)
+                    if floor is not None:
+                        tail = tail.where(UsageHistory.recorded_at < floor)
+                    tail = tail.order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc()).limit(
+                        per_account_row_cap
+                    )
+                    branches.append(select(tail.subquery()))
+                if floor is not None:
+                    branches.append(base.where(UsageHistory.recorded_at >= floor))
+            if not branches:
+                continue
+            bounded = union_all(*branches).subquery("bounded_projection_history")
+            result = await self._session.execute(
+                select(bounded).order_by(bounded.c.account_id, bounded.c.recorded_at, bounded.c.id)
+            )
+            for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
+                grouped.setdefault(account_id, []).append(
+                    UsageHistorySnapshot(
+                        id=int(id_),
+                        account_id=account_id,
+                        used_percent=float(used_percent),
+                        recorded_at=recorded_at,
+                        reset_at=float(reset_at) if reset_at is not None else None,
+                        window_minutes=int(window_minutes) if window_minutes is not None else None,
+                    )
+                )
         return grouped
 
     async def _bulk_history_since_capped_postgresql(

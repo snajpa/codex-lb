@@ -593,7 +593,7 @@ export function WeeklyCreditsPaceCard({
       <section className="rounded-xl border bg-card p-5" aria-label={t("dashboard.weeklyPace.title")} aria-busy={isLoading}>
         <h3 className="mb-4 text-sm font-semibold">{t("dashboard.weeklyPace.title")}</h3>
         {controls}
-        <p role="status" className="text-xs text-muted-foreground">{t(isLoading ? "dashboard.weeklyPace.windowLoading" : "dashboard.weeklyPace.burnNotMeasured")}</p>
+        <p role="status" className="text-xs text-muted-foreground">{error ?? t(isLoading ? "dashboard.weeklyPace.windowLoading" : "dashboard.weeklyPace.burnNotMeasured")}</p>
       </section>
     );
   }

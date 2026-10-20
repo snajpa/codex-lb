@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
@@ -9,8 +10,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.openai.model_registry import get_model_registry, is_public_model
-from app.db.session import detach_session_objects, get_background_session
-from app.dependencies import DashboardContext, get_dashboard_context
+from app.db.session import detach_session_objects, get_background_session, get_session
 from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
@@ -19,6 +19,7 @@ from app.modules.dashboard.schemas import (
 )
 from app.modules.model_sources.catalog import source_models_to_upstream_models
 from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.read_snapshots.service import SnapshotReader
 
 
 def _parse_burn_window_minutes(
@@ -45,13 +46,16 @@ async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
     burn_window_minutes: WeeklyPaceWindowMinutes = Depends(_parse_burn_window_minutes),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
-    context: DashboardContext = Depends(get_dashboard_context),
+    session: AsyncSession = Depends(get_session),
+    reports_timezone: str | None = Header(None, alias="X-Reports-Timezone"),
 ) -> DashboardOverviewResponse:
-    return await context.service.get_overview(
-        timeframe,
+    value = await SnapshotReader(session).dashboard(
+        timeframe=timeframe,
+        window=burn_window_minutes,
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
-        burn_window_minutes=burn_window_minutes,
+        timezone_hint=reports_timezone,
     )
+    return DashboardOverviewResponse.model_validate(value)
 
 
 @router.get(
@@ -61,9 +65,13 @@ async def get_overview(
 )
 async def get_projections(
     burn_window_minutes: WeeklyPaceWindowMinutes = Depends(_parse_burn_window_minutes),
-    context: DashboardContext = Depends(get_dashboard_context),
+    session: AsyncSession = Depends(get_session),
+    reports_timezone: str | None = Header(None, alias="X-Reports-Timezone"),
 ) -> DashboardProjectionsResponse:
-    return await context.service.get_projections(burn_window_minutes=burn_window_minutes)
+    value = await SnapshotReader(session).dashboard(
+        timeframe=None, window=burn_window_minutes, timezone_hint=reports_timezone
+    )
+    return DashboardProjectionsResponse.model_validate(value)
 
 
 @router.get("/models", dependencies=[Depends(require_dashboard_permission(Permission.DASHBOARD_READ))])

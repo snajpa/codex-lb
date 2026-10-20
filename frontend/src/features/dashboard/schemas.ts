@@ -1,3 +1,4 @@
+import { ReadSnapshotSchema } from "@/schemas/read-snapshot";
 import { z } from "zod";
 
 import { AccountAdditionalQuotaSchema, AccountSummarySchema } from "@/features/accounts/schemas";
@@ -199,6 +200,7 @@ export const ApiSpendProjectionSchema = z.object({
 export type ApiSpendProjection = z.infer<typeof ApiSpendProjectionSchema>;
 
 export const DashboardOverviewSchema = z.object({
+  snapshot: ReadSnapshotSchema.nullable().optional(),
   lastSyncAt: z.iso.datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
   accounts: z.array(AccountSummarySchema),
@@ -223,6 +225,7 @@ export const DashboardOverviewSchema = z.object({
 });
 
 export const DashboardProjectionsSchema = z.object({
+  snapshot: ReadSnapshotSchema.nullable().optional(),
   weeklyCreditPaceWindows: z.object({
     5: WeeklyCreditPaceSchema.nullable(),
     15: WeeklyCreditPaceSchema.nullable(),

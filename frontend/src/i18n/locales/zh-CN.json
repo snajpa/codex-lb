@@ -2038,5 +2038,12 @@
   "organisation.automaticAccounts.secret.description": "这是“{{label}}”的凭据。",
   "organisation.automaticAccounts.secret.warning": "请立即复制。它只显示这一次，之后无法再查看；如果丢失，请更换凭据。",
   "organisation.automaticAccounts.secret.copy": "复制凭据",
-  "organisation.errors.scim_token_not_found": "该凭据已不存在。"
+  "organisation.errors.scim_token_not_found": "该凭据已不存在。",
+  "readSnapshot.warming": "正在后台准备缓存数据…",
+  "readSnapshot.prepared": "生成于 {{time}} · 后台约每 {{minutes}} 分钟刷新",
+  "readSnapshot.delayed": "更新延迟，显示上次完成的快照。",
+  "readSnapshot.refreshing": "正在后台刷新。",
+  "readSnapshot.incompatible": "服务器响应不包含所选平均时间窗口，正在等待兼容的服务器版本。",
+  "readSnapshot.historyStart": "首条保留记录：{{time}}。缺失的历史记录不会被推算补齐。",
+  "readSnapshot.noHistory": "此范围没有匹配的保留请求记录。"
 }

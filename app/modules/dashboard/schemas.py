@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.modules.accounts.schemas import AccountSummary
+from app.modules.read_snapshots.schemas import ReadSnapshotMetadata
 from app.modules.shared.schemas import DashboardModel
 from app.modules.usage.schemas import MetricsTrends, UsageWindow, UsageWindowResponse
 
@@ -161,6 +162,7 @@ class ApiSpendProjectionResponse(DashboardModel):
 
 
 class DashboardOverviewResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     last_sync_at: datetime | None = None
     timeframe: DashboardOverviewTimeframe
     accounts: List[AccountSummary] = Field(default_factory=list)
@@ -175,6 +177,7 @@ class DashboardOverviewResponse(DashboardModel):
 
 
 class DashboardProjectionsResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     weekly_credit_pace_windows: dict[WeeklyPaceWindowMinutes, WeeklyCreditPaceResponse | None] = Field(
         default_factory=dict
     )
@@ -182,3 +185,12 @@ class DashboardProjectionsResponse(DashboardModel):
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
     quota_burn: list[AccountQuotaBurnResponse] = Field(default_factory=list)
+
+    @field_validator("weekly_credit_pace_windows", mode="before")
+    @classmethod
+    def parse_persisted_window_keys(cls, value: object) -> object:
+        # JSON object keys are strings; Literal[int] intentionally does not
+        # coerce them. Only the supported contract values may be restored.
+        if isinstance(value, dict):
+            return {int(key) if key in ("5", "15", "60", "180") else key: item for key, item in value.items()}
+        return value

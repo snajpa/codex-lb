@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    Text,
     UniqueConstraint,
     false,
     func,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy import Enum as SqlEnum
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
@@ -764,6 +766,30 @@ class AuditLog(Base):
     target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     target_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     severity: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'info'"))
+
+
+class ReadSnapshot(Base):
+    """Published analytical values; TTL never erases the last complete payload."""
+
+    __tablename__ = "read_snapshots"
+    __table_args__ = (Index("idx_read_snapshot_due", "kind", "schema_version", "refresh_at"),)
+
+    snapshot_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str | None] = mapped_column(
+        Text().with_variant(MEDIUMTEXT(), "mysql", "mariadb"), nullable=True
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    published_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    refresh_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    refresh_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    last_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class SchedulerLeader(Base):

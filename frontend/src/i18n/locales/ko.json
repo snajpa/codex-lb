@@ -2038,5 +2038,12 @@
   "organisation.automaticAccounts.secret.description": "“{{label}}”의 자격 증명입니다.",
   "organisation.automaticAccounts.secret.warning": "지금 복사하세요. 한 번만 표시되고 다시 볼 수 없습니다. 잃어버렸다면 자격 증명을 교체하세요.",
   "organisation.automaticAccounts.secret.copy": "자격 증명 복사",
-  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다."
+  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다.",
+  "readSnapshot.warming": "백그라운드에서 캐시 데이터를 준비하고 있습니다…",
+  "readSnapshot.prepared": "준비 시간 {{time}} · 약 {{minutes}}분마다 백그라운드 갱신",
+  "readSnapshot.delayed": "갱신이 지연되어 마지막으로 완료된 스냅샷을 표시합니다.",
+  "readSnapshot.refreshing": "백그라운드에서 갱신 중입니다.",
+  "readSnapshot.incompatible": "서버 응답에 선택한 평균 구간이 없습니다. 호환되는 서버 버전을 기다리고 있습니다.",
+  "readSnapshot.historyStart": "보존된 첫 관측: {{time}}. 누락된 기록은 복원하지 않습니다.",
+  "readSnapshot.noHistory": "이 범위에 해당하는 보존된 요청 관측이 없습니다."
 }

@@ -2038,5 +2038,12 @@
   "organisation.automaticAccounts.secret.description": "This is the credential for “{{label}}”.",
   "organisation.automaticAccounts.secret.warning": "Copy it now. It is shown once and cannot be read again; if you lose it, replace the credential.",
   "organisation.automaticAccounts.secret.copy": "Copy credential",
-  "organisation.errors.scim_token_not_found": "That credential no longer exists."
+  "organisation.errors.scim_token_not_found": "That credential no longer exists.",
+  "readSnapshot.warming": "Preparing cached data in the background…",
+  "readSnapshot.prepared": "Prepared {{time}} · background refresh about every {{minutes}} min",
+  "readSnapshot.delayed": "Update delayed; showing the last completed snapshot.",
+  "readSnapshot.refreshing": "Refreshing in the background.",
+  "readSnapshot.incompatible": "The backend response does not contain the selected averaging window. Waiting for a compatible server generation.",
+  "readSnapshot.historyStart": "First retained observation: {{time}}. Missing history is not reconstructed.",
+  "readSnapshot.noHistory": "No retained request observations match this scope."
 }
