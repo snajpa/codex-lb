@@ -30,6 +30,7 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from tests.integration.compact_test_helpers import _make_auth_json
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -1407,8 +1408,12 @@ async def test_proxy_compact_token_invalidated_marks_reauth_and_fails_over(async
     accounts = {account["accountId"]: account for account in accounts_response.json()["accounts"]}
     assert accounts[invalidated_account_id]["status"] == "reauth_required"
 
+    # The real background producer prepares this seeded state outside HTTP.
+    await prepare_read_snapshot("/api/dashboard/overview")
     overview_response = await async_client.get("/api/dashboard/overview")
     assert overview_response.status_code == 200
+    assert overview_response.json()["snapshot"]["stale"] is False
+    assert overview_response.json()["snapshot"]["lastError"] is None
     overview_accounts = {account["accountId"]: account for account in overview_response.json()["accounts"]}
     assert overview_accounts[invalidated_account_id]["status"] == "reauth_required"
 
