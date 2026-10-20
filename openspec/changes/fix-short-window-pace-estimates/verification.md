@@ -31,13 +31,39 @@ a wrong query parameter, an overview-map assumption, expired ORM attributes afte
 rollback and a scheduler lease literal tied to the prior contract. Those failures
 remain evidence; they are not retroactively counted as passes.
 
-The running production application is still the prior build at this checkpoint.
-Immutable staging, real new-build browser/API/native checks, safe retained-client
-handoff, two-new-replica shared recovery and normal-address forty-session coexistence
-remain rollout work. A synthetic encrypted-context exchange across existing backends
-does not prove every native client can reconnect with process-local previous-response
-state intact. Do not describe source publication or cold staging as deployment.
+The corrected immutable application is now selected on the normal endpoint.
+Candidate and normal-address checks verified TLS, authentication, every built asset,
+both dashboard routes and all four averaging windows against independent raw-data
+rate, reset-aware depletion and feasible-load calculations. A real built browser
+remained open for 311.428 seconds and observed the dashboard advance from generation
+2 to 3 at the five-minute cadence without browser-started collection or a loading
+state. Forty native generations all overlapped and completed in 4.614 seconds while
+the automatic seven-day report SQL refresh was active; all stream text matched its
+completed payload. These are observed samples, not universal latency guarantees.
+Real tool-result continuation and encrypted compaction into an isolated session
+also passed on the normal endpoint.
 
-Broader inherited native complexity, security/dependency and test seams remain
-separate from introduced failures; no full cloud-CI-green or full MySQL claim follows.
-Archive only after the outstanding consumer and rollout evidence exists.
+Before selection, an unused candidate was safely stopped and restarted. Seven
+published generation/payload hashes stayed identical while it was stopped and on
+authenticated reads after restart. Both exact immutable artifacts also passed real
+application lifespans against the shared qualification database. That does not yet
+prove two new production replicas or a host-power-failure recovery. The unselected
+prior replica still owns connections and remains protected; its replacement waits
+for natural idle and the fenced retirement checks. No active client was forcibly
+disconnected. A synthetic encrypted-context exchange across backends does not prove
+every native client can reconnect with process-local previous-response state intact.
+
+Cloud PostgreSQL tests and all three database migration checks now pass. Cloud
+frontend, browser, end-to-end, integration-bridge and first core-shard checks also
+pass. Current unit failures exactly match the eleven failures on the earlier base;
+all 132 reported type diagnostics are also present on that base (134 there). The
+third core shard retains the same model-source failure, and four second-shard retry
+seams are inherited. A further introduced compaction fixture still expected an
+immediately computed dashboard after account-state mutation: it now explicitly
+runs the real producer outside HTTP, preserving all native failover assertions and
+checking fresh/error-free snapshot state. That focused fixture passes on SQLite
+and MariaDB and received a separate source-only review with no actionable findings.
+No application code changed for this fixture correction. Broader native complexity,
+security/dependency and test seams remain separate; no full cloud-CI-green or full
+MySQL claim follows. Archive only after the outstanding two-new-replica rollout
+evidence exists.
