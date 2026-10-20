@@ -18,6 +18,7 @@ from app.modules.read_snapshots.keys import report_parameters, resolve_parameter
 from app.modules.read_snapshots.repository import (
     KIND_CAPACITY,
     MAX_ENTRIES,
+    SCHEMA_VERSION,
     SnapshotCapacityError,
     SnapshotRepository,
     encode_parameters,
@@ -140,8 +141,8 @@ async def test_last_good_is_shared_across_replicas_and_failure_does_not_erase_it
 
 @pytest.mark.asyncio
 async def test_expired_and_superseded_producers_cannot_publish(db_setup):
-    old = LeaderElection("snapshot-old", lease_id=101)
-    new = LeaderElection("snapshot-new", lease_id=101)
+    old = LeaderElection("snapshot-old", lease_id=100 + SCHEMA_VERSION)
+    new = LeaderElection("snapshot-new", lease_id=100 + SCHEMA_VERSION)
     assert await old.try_acquire()
     assert not await new.try_acquire()
     key = await _register()
@@ -157,7 +158,9 @@ async def test_expired_and_superseded_producers_cannot_publish(db_setup):
         assert abandoned is not None
     async with SessionLocal() as session:
         await session.execute(
-            update(SchedulerLeader).where(SchedulerLeader.id == 101).values(expires_at=utcnow() - timedelta(seconds=1))
+            update(SchedulerLeader)
+            .where(SchedulerLeader.id == 100 + SCHEMA_VERSION)
+            .values(expires_at=utcnow() - timedelta(seconds=1))
         )
         await session.commit()
     async with SessionLocal() as session:
@@ -198,8 +201,8 @@ async def test_independent_lease_works_with_default_leader_disabled(db_setup, mo
             )
         )
         await session.commit()
-    first = LeaderElection("new-first", lease_id=101)
-    second = LeaderElection("new-second", lease_id=101)
+    first = LeaderElection("new-first", lease_id=100 + SCHEMA_VERSION)
+    second = LeaderElection("new-second", lease_id=100 + SCHEMA_VERSION)
     assert await first.try_acquire()
     assert not await second.try_acquire()
     assert await first.release()
@@ -240,7 +243,7 @@ async def test_cancellation_joins_collector_and_preserves_payload(db_setup, monk
     assert value.payload == {"value": "good"}
     assert value.last_error == "cancelled"
     async with SessionLocal() as session:
-        assert await session.get(SchedulerLeader, 101) is None
+        assert await session.get(SchedulerLeader, 100 + SCHEMA_VERSION) is None
 
 
 @pytest.mark.asyncio
@@ -465,7 +468,7 @@ async def test_lease_loss_cancels_both_owned_lanes(db_setup, monkeypatch):
             async with SessionLocal() as session:
                 await session.execute(
                     update(SchedulerLeader)
-                    .where(SchedulerLeader.id == 101)
+                    .where(SchedulerLeader.id == 100 + SCHEMA_VERSION)
                     .values(leader_id="takeover", expires_at=utcnow() + timedelta(minutes=1))
                 )
                 await session.commit()
@@ -473,7 +476,7 @@ async def test_lease_loss_cancels_both_owned_lanes(db_setup, monkeypatch):
     finally:
         assert await worker.stop()
     async with SessionLocal() as session:
-        owner = await session.get(SchedulerLeader, 101)
+        owner = await session.get(SchedulerLeader, 100 + SCHEMA_VERSION)
         assert owner is not None
         assert owner.leader_id == "takeover"
         assert (
@@ -559,7 +562,7 @@ async def test_mysql_fence_uses_same_session_clock_as_lease(db_setup, monkeypatc
             yield session
 
     monkeypatch.setattr(leader_election, "get_background_session", session_scope)
-    leader = LeaderElection(lease_id=101)
+    leader = LeaderElection(lease_id=100 + SCHEMA_VERSION)
     try:
         assert await leader.try_acquire()
         async with session_scope() as session:
@@ -571,7 +574,9 @@ async def test_mysql_fence_uses_same_session_clock_as_lease(db_setup, monkeypatc
             assert await repository.publish(
                 key, generation, leader, {"value": "good"}, interval_seconds=300, duration_ms=1
             )
-            await session.execute(text("UPDATE scheduler_leader SET expires_at=NOW(6)-INTERVAL 1 SECOND WHERE id=101"))
+            await session.execute(
+                text(f"UPDATE scheduler_leader SET expires_at=NOW(6)-INTERVAL 1 SECOND WHERE id={100 + SCHEMA_VERSION}")
+            )
             await session.commit()
             # A positive session offset must not extend an actually expired lease.
             assert not await repository.publish(

@@ -35,6 +35,27 @@ const BASE_PACE: WeeklyCreditPace = {
 };
 
 describe("WeeklyCreditsPaceCard", () => {
+  it("discloses selected traffic window and distinct quota calibration without claiming a direct measurement", () => {
+    render(<WeeklyCreditsPaceCard burnWindowMinutes={5} pace={{ ...BASE_PACE, burnWindowMinutes: 5,
+      runwayStatus: "runs_dry", headroomPercent: 30, headroomCredits: 500000,
+      burnRateRecentCreditsPerHour: 12000, depletionEtaHours: 8,
+      burnRateBasis: "traffic_calibrated", observedQuotaBurnRateCreditsPerHour: 0,
+      burnCalibrationMinutes: 120, burnObservedRequestCount: 465, confidence: "low",
+      burnUnpricedRequestCount: 1, burnCalibrationUnpricedRequestCount: 2,
+    }} />);
+    const label = screen.getByTestId("weekly-pace-traffic-estimate");
+    expect(label).toHaveTextContent("465 requests");
+    expect(label).toHaveTextContent("5m");
+    expect(label).toHaveTextContent("2h of quota observations");
+    expect(label).toHaveTextContent("Estimate");
+    expect(screen.getByTestId("weekly-pace-incomplete-work")).toHaveTextContent("Their usage is unknown, not zero");
+  });
+
+  it("does not invent calibration metadata for a direct quota rate", () => {
+    render(<WeeklyCreditsPaceCard pace={{ ...BASE_PACE, burnRateBasis: "quota" }} />);
+    expect(screen.queryByTestId("weekly-pace-traffic-estimate")).not.toBeInTheDocument();
+  });
+
   it("renders weekly pace percentages and separates schedule gap from forecast shortfall", () => {
     render(<WeeklyCreditsPaceCard pace={BASE_PACE} />);
 

@@ -184,7 +184,9 @@ def test_read_snapshot_migration_refuses_alien_layout_without_deleting_rows(migr
         elif layout == "extra-index":
             Index("alien_kind_index", table.c.kind)
         elif layout == "generated":
-            table.c.payload_json.computed = Computed("'alien generated payload'", persisted=False)
+            table.c.payload_json.computed = Computed(
+                "'alien generated payload'", persisted=engine.dialect.name == "postgresql"
+            )
             table.c.payload_json.server_default = table.c.payload_json.computed
             table.c.payload_json.server_onupdate = table.c.payload_json.computed
         else:
