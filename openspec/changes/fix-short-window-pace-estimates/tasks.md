@@ -1,9 +1,9 @@
 ## Correct and qualify
-- [ ] Reproduce rounded-flat quota with real five-minute traffic and retain evidence.
-- [ ] Correct migration reflection and prove affected database retry/downgrade paths.
-- [ ] Implement bounded background traffic calibration and truthful response metadata.
-- [ ] Integrate the estimate into the existing card without wrong-window fallback.
-- [ ] Add separate regression patches and independent review.
+- [x] Reproduce rounded-flat quota with real five-minute traffic and retain evidence.
+- [x] Correct migration reflection and prove affected database retry/downgrade paths.
+- [x] Implement bounded background traffic calibration and truthful response metadata.
+- [x] Integrate the estimate into the existing card without wrong-window fallback.
+- [x] Add separate regression patches and independent review.
 - [ ] Verify numerical/API/built-browser behavior and measure bounded refresh cost.
 
 ## Deliver

@@ -102,3 +102,33 @@ built-page test. A failed response-body capture during navigation is not a
 successful continuous-browser test. The normal-address cadence check verifies a
 new automatic generation and no selection-triggered HTTP calculation; transport
 and native coexistence are checked separately. See [`spec.md`](./spec.md).
+
+
+## Short-window calibrated traffic estimates
+
+### Purpose and rationale
+
+Rounded whole-percent provider counters can remain unchanged while hundreds of
+requests complete. The five- and fifteen-minute card therefore uses selected-window
+priced work, calibrated per account against a positive same-cycle quota change over
+at most three hours. This is an empirical estimate, not a fixed currency-to-credit
+conversion or a longer-window traffic rate under a short label. Normative behavior
+is in [spec.md](./spec.md), including the separate direct-observation contract.
+
+### Constraints and failure modes
+
+All fresh included accounts need a valid positive calibration episode. Resets,
+percentage corrections, expired resets and stale anchors invalidate the episode.
+Missing usage/cost on cancelled or failed requests is unknown, not free: the card
+shows omitted counts for both intervals and low confidence. An all-unpriced current
+window cannot produce a fabricated estimate. One- and three-hour selections retain
+the direct quota calculation; all advice uses the same selected burn rate.
+
+### Example and operations
+
+If an account used ten percent of its quota across ten priced work units, one
+priced work unit in the selected five minutes estimates twelve percent per hour.
+A rounded-flat five-minute counter remains separately visible as a direct zero
+observation. Operators see the estimate basis, selected request count and calibration
+span in the existing runway card. Browser reads remain shared snapshot reads; a
+new release needs its own API, built-browser and native rollout qualification.

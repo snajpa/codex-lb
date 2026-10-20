@@ -105,3 +105,42 @@ changing selected observations. The additive derived-table migration validates
 unexpected layouts, including generated columns, before retry or downgrade;
 old binaries require a compatible migration-aware rollback rather than ignoring
 an unknown schema head. See [`spec.md`](./spec.md) for the normative contracts.
+
+
+## Short-window calibration and mixed snapshot contracts
+
+### Purpose and decision rationale
+
+The background dashboard producer reuses its already loaded quota history and
+executes one grouped request-work query bounded to eligible accounts and a maximum
+three-hour calibration interval. Returning account aggregates instead of request
+rows keeps refresh cost bounded; changing a browser selection never starts this SQL.
+Normative requirements live in [spec.md](./spec.md).
+
+### Version and capacity constraints
+
+Snapshot contract two uses separate keys and scheduler lease 102, so a mixed fleet
+cannot overwrite contract-one payloads or claim their data under a new schema.
+The global registry remains 64 entries, including both versions. Canonical current
+entries can preempt only idle unpinned older-version cache entries; prior pinned
+last-good and active producers remain fenced. A displaced old exact filter key is
+honestly warming rather than relabelled from a new key.
+
+### Failure modes and compatibility example
+
+A registry filled by recent old-version custom filters must not prevent the new
+dashboard and admitted report presets from becoming ready. Busy entries remain
+protected even at capacity. Separately, PostgreSQL may reflect literal defaults
+as quoted integers with explicit bigint casts. Equivalent literal spellings are
+normalized by the existing derived-table validator, while expressions, computed
+columns, constraints and incompatible defaults still refuse before mutation.
+The correction changes neither revision/parent nor intended schema or data meaning.
+
+### Verification and rollout notes
+
+Qualification covers fresh migration, exact-layout retry, downgrade/re-upgrade,
+real collector/HTTP separation, selected-window work and mixed-registry admission.
+A read-only production comparison measured the added grouped query at approximately
+83 ms across roughly 15,700 retained requests and ten accounts; this is a measured
+example, not a universal latency guarantee. Immutable source and current ownership
+need separate rollout proof before a release is described as deployed.
