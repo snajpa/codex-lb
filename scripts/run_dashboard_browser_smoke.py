@@ -24,8 +24,9 @@ SHUTDOWN_TIMEOUT_SECONDS = 30.0
 # Background loops the app lifespan builds through ``app.main`` seams. The smoke
 # backend replaces every builder with a no-op in-process (mirroring the autouse
 # ``_disable_background_loop_schedulers`` fixture in tests/conftest.py, which
-# pins this tuple) instead of exporting ``CODEX_LB_*_ENABLED=false``: the
-# dashboard under test never needs them, several would leave the process
+# pins this tuple except the analytical read worker) instead of exporting
+# ``CODEX_LB_*_ENABLED=false``: the dashboard does not need upstream loops,
+# several of which would leave the process
 # (public GitHub/npm catalog lookups, upstream usage polls), and an env override
 # silently stops working the day the toggle behind it is constantized.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
@@ -48,8 +49,8 @@ class _NoopScheduler:
     async def start(self) -> None:
         return None
 
-    async def stop(self) -> None:
-        return None
+    async def stop(self) -> bool:
+        return True
 
 
 def _disable_background_loops(
@@ -57,7 +58,7 @@ def _disable_background_loops(
     *,
     setter: Callable[[ModuleType, str, Any], None] = setattr,
 ) -> None:
-    """Make the app lifespan skip every background loop and the live-usage ingestor.
+    """Skip upstream loops and ingestion, but keep the real snapshot producer.
 
     The lifespan resolves these names from ``app.main`` globals at startup, so
     rebinding them here is sufficient. The live-usage ingestor is a queue
@@ -132,7 +133,7 @@ def _wait_until_ready(server: subprocess.Popen[bytes], base_url: str) -> None:
         if return_code is not None:
             raise RuntimeError(f"dashboard smoke backend exited during startup with code {return_code}")
         try:
-            with opener.open(f"{base_url}/health", timeout=1.0) as response:
+            with opener.open(f"{base_url}/health/read-snapshots", timeout=1.0) as response:
                 if response.status == 200:
                     return
         except (TimeoutError, urllib.error.URLError):
@@ -180,7 +181,9 @@ def run() -> int:
             _wait_until_ready(server, base_url)
             playwright_environment = environment | {
                 "CODEX_LB_BROWSER_SMOKE_BASE_URL": base_url,
-                "CODEX_LB_BROWSER_SMOKE_OUTPUT_DIR": str(data_dir / "playwright-output"),
+                "CODEX_LB_BROWSER_SMOKE_OUTPUT_DIR": os.environ.get(
+                    "CODEX_LB_BROWSER_SMOKE_OUTPUT_DIR", str(data_dir / "playwright-output")
+                ),
             }
             playwright_environment.pop("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN")
             completed = subprocess.run(

@@ -48,8 +48,8 @@ class _NoopScheduler:
     async def start(self) -> None:
         return None
 
-    async def stop(self) -> None:
-        return None
+    async def stop(self) -> bool:
+        return True
 
 
 # Every background loop the app lifespan builds through an ``app.main``
@@ -66,6 +66,7 @@ class _NoopScheduler:
 # themselves (e.g. test_otel, test_telemetry_consent,
 # test_model_registry_replication) and keep working.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_read_snapshot_scheduler",
     "build_metadata_refresh_scheduler",
     "build_usage_refresh_scheduler",
     "build_model_refresh_scheduler",
@@ -255,7 +256,7 @@ _schema_built_for: str | None = None
 def _recreate_test_schema(sync_conn) -> None:
     from app.db.migration_indexes import is_mariadb
 
-    _drop_test_migration_tables(sync_conn)    # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
+    _drop_test_migration_tables(sync_conn)  # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
     # ``mysql``: test the server, not the URL spelling.
     if is_mariadb(sync_conn):
         detached = _detach_functional_indexes()
@@ -306,9 +307,7 @@ def _reset_test_database(sync_conn, module: str | None = None) -> None:
     # rebuilds. ``CODEX_LB_TEST_RECREATE_SCHEMA=1`` asks for the old behaviour,
     # which is also the fallback when a test leaves the schema altered.
     global _schema_built_for
-    if not (is_mariadb(sync_conn) or is_mysql(sync_conn)) or os.environ.get(
-        "CODEX_LB_TEST_RECREATE_SCHEMA"
-    ) == "1":
+    if not (is_mariadb(sync_conn) or is_mysql(sync_conn)) or os.environ.get("CODEX_LB_TEST_RECREATE_SCHEMA") == "1":
         _recreate_test_schema(sync_conn)
         return
     if _schema_built_for != module:

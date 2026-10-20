@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
+from sqlalchemy import select, update
 from sqlalchemy.engine import make_url
 
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, ReadSnapshot, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import UsageRepository
@@ -85,6 +87,47 @@ async def main() -> None:
                 )
             )
         await session.commit()
+        # The fixture changes historical inputs out of band. Mark existing
+        # derived values due, then wait for the REAL lifespan-owned worker.
+        # No collector is run by this helper or by the browser's HTTP reads.
+        due_at = utcnow()
+        await session.execute(update(ReadSnapshot).values(refresh_at=due_at))
+        await session.commit()
+    async with asyncio.timeout(30):
+        while True:
+            async with SessionLocal() as session:
+                generated = (
+                    await session.execute(select(ReadSnapshot.generated_at).where(ReadSnapshot.kind == "dashboard"))
+                ).scalar_one_or_none()
+            if generated is not None and generated >= due_at:
+                break
+            await asyncio.sleep(0.2)
 
 
-asyncio.run(main())
+async def observe() -> None:
+    # Only synthetic observations in the same owned SQLite smoke fixture.
+    # Without continued observations a five-minute test SHOULD eventually
+    # report stale/insufficient data; browser refresh must not conceal that.
+    root = Path(os.environ["CODEX_LB_DATA_DIR"])
+    database = make_url(get_settings().database_url)
+    assert root.name.startswith("codex-lb-dashboard-browser-smoke-")
+    assert database.get_backend_name() == "sqlite"
+    assert Path(database.database or "").resolve() == root.joinpath("store.db").resolve()
+    reset = int(naive_utc_to_epoch(utcnow() + timedelta(days=6)))
+    for tick in range(1, 7):
+        await asyncio.sleep(60)
+        async with SessionLocal() as session:
+            usage = UsageRepository(session)
+            for index in range(12):
+                await usage.add_entry(
+                    f"fixture-max-{index:02d}",
+                    14.0 + index + tick * 0.1,
+                    window="primary",
+                    window_minutes=10080,
+                    reset_at=reset,
+                    recorded_at=utcnow(),
+                )
+            await session.commit()
+
+
+asyncio.run(observe() if sys.argv[1:] == ["--observe"] else main())

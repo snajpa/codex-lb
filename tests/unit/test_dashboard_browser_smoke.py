@@ -113,12 +113,16 @@ def test_smoke_backend_disables_the_same_background_loops_as_the_test_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     smoke_harness = _load_smoke_harness()
-    assert smoke_harness.BACKGROUND_LOOP_BUILDERS == BACKGROUND_LOOP_BUILDERS
+    assert smoke_harness.BACKGROUND_LOOP_BUILDERS == tuple(
+        name for name in BACKGROUND_LOOP_BUILDERS if name != "build_read_snapshot_scheduler"
+    )
+    read_builder = main_module.build_read_snapshot_scheduler
 
     smoke_harness._disable_background_loops(main_module, setter=monkeypatch.setattr)
 
-    for builder_name in BACKGROUND_LOOP_BUILDERS:
+    for builder_name in smoke_harness.BACKGROUND_LOOP_BUILDERS:
         assert isinstance(getattr(main_module, builder_name)(), smoke_harness._NoopScheduler), builder_name
+    assert main_module.build_read_snapshot_scheduler is read_builder
     assert main_module.start_live_usage_ingestor() is None
 
 

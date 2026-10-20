@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
 import { DashboardProjectionsSchema } from "../src/features/dashboard/schemas";
+import { ReportsResponseSchema } from "../src/features/reports/schemas";
 import {
   createAccountSummary,
   createDashboardAuthSession,
@@ -738,4 +739,69 @@ test("reset-aware runway does not turn a no-reset ratio into actual exhaustion",
   await expect(page.getByText("No depletion projected over two quota windows", { exact: true })).toBeVisible();
   await expect(page.getByText(/runs out in/)).toHaveCount(0);
   await expect(page.getByTestId("runway-eta-marker")).toHaveCount(0);
+});
+
+test("prepared report presets and five-minute reload use independently refreshed server snapshots", async ({ page }) => {
+  test.setTimeout(360_000);
+  execFileSync("python3", [path.resolve("browser-smoke/seed_accounting.py")], { cwd: path.resolve(".."), env: process.env });
+  const projectionResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/api/dashboard/projections" && response.ok());
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+  const initialResponse = await projectionResponse;
+  const initial = DashboardProjectionsSchema.parse(await initialResponse.json());
+  expect(initial.snapshot?.generatedAt).toBeTruthy();
+  expect(initial.snapshot?.refreshIntervalSeconds).toBe(300);
+  expect(initialResponse.headers()["connection"]).toBe("close");
+  expect(initial.weeklyCreditPaceWindows?.[5]?.burnRateRecentCreditsPerHour).toBeGreaterThan(0);
+  const controls = page.getByRole("group", { name: "Average over" });
+  await controls.getByRole("button", { name: "5 min", exact: true }).click();
+  await expect(page.getByTestId("read-snapshot-status")).toBeVisible();
+
+  // No report HTTP request preceded these preset reads. The real worker,
+  // rather than an endpoint or a test collector call, prepared every bundle.
+  const end = new Date().toISOString().slice(0, 10);
+  for (const days of [7, 30, 90]) {
+    const start = new Date(`${end}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - days + 1);
+    const query = new URLSearchParams({ start_date: start.toISOString().slice(0, 10), end_date: end, timezone: "UTC" });
+    const response = await page.request.get(`/api/reports?${query}`);
+    expect(response.status()).toBe(200);
+    const report = ReportsResponseSchema.parse(await response.json());
+    expect(report.snapshot?.generatedAt).toBeTruthy();
+    expect(report.snapshot?.stale).toBe(false);
+    expect(report.speedMetricsAvailable).toBe(days <= 7);
+  }
+
+  const screenshotDirectory = process.env.DASHBOARD_SCREENSHOT_OUTPUT_DIR;
+  if (screenshotDirectory) await page.screenshot({ path: path.join(screenshotDirectory, "prepared-five-minute-before.png"), fullPage: true });
+
+  // Leave a built page alive through a REAL five-minute production cadence.
+  // No accelerated clock, shortened scheduler interval or request-triggered
+  // collection is used. All subsequent reads must contain a newer generation.
+  const observations = spawn("python3", [path.resolve("browser-smoke/seed_accounting.py"), "--observe"], {
+    cwd: path.resolve(".."), env: process.env, stdio: ["ignore", "inherit", "inherit"],
+  });
+  const observedExit = new Promise<void>((resolve, reject) => {
+    observations.once("exit", () => resolve());
+    observations.once("error", reject);
+  });
+  try {
+    await page.waitForTimeout(310_000);
+    expect(observations.exitCode).toBeNull();
+    const afterResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/api/dashboard/projections" && response.ok());
+    await page.reload({ waitUntil: "networkidle" });
+    const after = DashboardProjectionsSchema.parse(await (await afterResponse).json());
+    expect(after.snapshot!.generation).toBeGreaterThan(initial.snapshot!.generation);
+    expect(new Date(after.snapshot!.generatedAt!).getTime()).toBeGreaterThan(new Date(initial.snapshot!.generatedAt!).getTime());
+    expect(after.snapshot!.stale).toBe(false);
+    expect(after.weeklyCreditPaceWindows?.[5]?.burnWindowMinutes).toBe(5);
+    expect(after.weeklyCreditPaceWindows?.[5]?.burnRateRecentCreditsPerHour).toBeGreaterThan(0);
+    await expect(controls.getByRole("button", { name: "5 min", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByText("Loading averaging values…", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("not enough recent samples to measure burn", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("read-snapshot-status")).toBeVisible();
+    if (screenshotDirectory) await page.screenshot({ path: path.join(screenshotDirectory, "prepared-five-minute-after.png"), fullPage: true });
+  } finally {
+    observations.kill("SIGTERM");
+    await observedExit;
+  }
 });

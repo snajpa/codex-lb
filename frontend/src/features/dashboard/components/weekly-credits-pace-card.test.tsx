@@ -533,3 +533,11 @@ describe("reset-aware runway numbers", () => {
     expect(screen.queryByText(/runs out in/)).not.toBeInTheDocument();
   });
 });
+
+
+it("does not describe a response/version failure as missing quota samples", () => {
+  render(<WeeklyCreditsPaceCard pace={null} burnWindowMinutes={5}
+    onBurnWindowChange={() => {}} error="Incompatible backend generation" />);
+  expect(screen.getByText("Incompatible backend generation")).toBeInTheDocument();
+  expect(screen.queryByText("not enough recent samples to measure burn")).not.toBeInTheDocument();
+});

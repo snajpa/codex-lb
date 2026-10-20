@@ -57,7 +57,8 @@ describe("useDashboard", () => {
     const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview", "30d"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
-    expect(refetchInterval).toBe(15_000);
+    expect(typeof refetchInterval).toBe("function");
+    expect((refetchInterval as (q: unknown) => number)(query)).toBe(15_000);
   });
 
   it("passes timeframe to the overview endpoint", async () => {
@@ -110,7 +111,8 @@ describe("useDashboard", () => {
     const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections", "all-windows"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
-    expect(refetchInterval).toBe(5_000);
+    expect(typeof refetchInterval).toBe("function");
+    expect((refetchInterval as (q: unknown) => number)(query)).toBe(5_000);
   });
 
   it("loads every window in one request before selection and switches from cache", async () => {
@@ -216,4 +218,16 @@ describe("useDashboard", () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true));
   });
+});
+
+it("marks an old retained backend response as incompatible instead of missing quota samples", async () => {
+  const legacy = { ...eagerProjection(), weeklyCreditPaceWindows: undefined };
+  server.use(http.get("*/api/dashboard/projections", () => HttpResponse.json(legacy)));
+  const client = createTestQueryClient();
+  const { result, unmount } = renderHook(() => useDashboardProjections(true, 5), { wrapper: createWrapper(client) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(result.current.data?.windowCompatible).toBe(false);
+  expect(result.current.data?.weeklyCreditPace).toBeNull();
+  unmount();
+  client.clear();
 });
