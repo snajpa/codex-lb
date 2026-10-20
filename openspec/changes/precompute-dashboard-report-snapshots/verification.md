@@ -119,11 +119,40 @@ Existing baseline cloud lint/type/native/security and fork publishing-configurat
 failures are not claimed green by the scoped qualification above. No unrelated
 dependency or native churn was used to conceal them.
 
+## Post-publication CI findings and test-only correction
+
+The application-matching source was published on the fork's main and feature
+branches on 2026-10-20. Broader cloud CI is **not green**. Its eleven unit-test
+failure names exactly match the previously published base; lint stops at the
+unchanged native architecture budget, and unchanged dependency inputs still
+trigger security failures. These are not waived or represented as passing.
+
+The wider check also exposed introduced findings that the focused gates missed:
+58 type diagnostics in the new regression tests, several older dashboard tests
+that had not explicitly prepared snapshots, and a PostgreSQL migration-layout
+rejection. The test-only follow-up adds actual Optional/JSON shape assertions,
+concrete SQLAlchemy table types and explicit out-of-HTTP preparation. The parity
+case compares the complete business payload before/after folding, excludes only
+snapshot metadata, and requires a newer generation so a stale cached comparison
+cannot pass. Independent source reviews found no actionable issue. The four typed
+regression files passed typing/lint plus 57 SQLite cases (four MariaDB-only skips)
+and 61 real MariaDB cases. The five additional fixture scenarios passed both
+SQLite and MariaDB. This follow-up changes no served application, schema,
+provider, native transport, dependency or configuration input.
+
+The already-published migration still has one introduced default-clause typing
+diagnostic and a real PostgreSQL existing-layout rejection. Project policy forbids
+editing merged migrations; operator direction is pending before any correction.
+Do not describe these as inherited failures or claim PostgreSQL compatibility
+qualified. The live MariaDB producer and restart/browser/numerical/native results
+above remain separate, valid observations; they are not a substitute for resolving
+the PostgreSQL defect. No full-suite green or archive claim is made.
+
 ## Critical closure item — do not archive yet
 
-The final task remains open. Publish the verified application-matching fork source,
-then finish the protected two-replica rolling replacement and preserve its qualified
-rollback record before archiving. Existing protected client owners on the old
+The final task remains open. The application-matching fork source is published.
+Resolve introduced CI findings, finish the protected two-replica rolling replacement
+and preserve its qualified rollback record before archiving. Existing protected client owners on the old
 replica must not be killed to manufacture an idle proof or to start a third backend.
 The new worker and selected endpoint are delivered; this does not imply the second
 new production replica or a host power-failure exercise is already complete.

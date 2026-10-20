@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.dialect_sql import is_mysql
 from app.db.models import RequestLog
@@ -106,7 +108,7 @@ async def test_bound_requires_a_real_repeatable_server_view(dialect, isolation, 
         get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name=dialect)),
         connection=AsyncMock(return_value=connection),
     )
-    assert await ReportsRepository(session).has_repeatable_history_view() is allowed
+    assert await ReportsRepository(cast(AsyncSession, session)).has_repeatable_history_view() is allowed
     if dialect == "sqlite":
         session.connection.assert_not_awaited()
 
@@ -165,5 +167,7 @@ async def test_report_worker_isolation_is_owned_and_restored(db_setup, monkeypat
     assert seen == ["REPEATABLE READ"]
     async with get_background_session() as session:
         assert await (await session.connection()).get_isolation_level() == before
-        assert (await SnapshotRepository(session).read(key, interval_seconds=300)).payload == {"prepared": True}
+        value = await SnapshotRepository(session).read(key, interval_seconds=300)
+        assert value is not None
+        assert value.payload == {"prepared": True}
     assert await worker.stop()

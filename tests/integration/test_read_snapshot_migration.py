@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -12,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Table,
     UniqueConstraint,
     create_engine,
     inspect,
@@ -95,9 +98,9 @@ def test_read_snapshot_partial_upgrade_retries_preserve_derived_rows(migration_u
         # Reproduce the physical MariaDB crash boundary: table (optionally its
         # index) exists, but Alembic still records the parent revision.
         with engine.begin() as connection:
-            ReadSnapshot.__table__.create(connection)
+            cast(Table, ReadSnapshot.__table__).create(connection)
             if not index_created:
-                connection.execute(DropIndex(next(iter(ReadSnapshot.__table__.indexes))))
+                connection.execute(DropIndex(next(iter(cast(Table, ReadSnapshot.__table__).indexes))))
             connection.execute(
                 text(
                     "INSERT INTO read_snapshots "
@@ -128,7 +131,7 @@ def test_read_snapshot_partial_downgrade_finishes_after_table_already_dropped(mi
                     "VALUES (1,'preserved-owner','2026-10-19 00:00:00','2026-10-19 01:00:00')"
                 )
             )
-            ReadSnapshot.__table__.drop(connection)
+            cast(Table, ReadSnapshot.__table__).drop(connection)
         command.downgrade(_build_alembic_config(migration_url), _PARENT)
         with engine.connect() as connection:
             assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == _PARENT
@@ -146,7 +149,7 @@ def test_read_snapshot_retry_refuses_existing_incompatible_column_type(migration
     run_upgrade(migration_url, _PARENT, bootstrap_legacy=False)
     engine = create_engine(to_sync_database_url(migration_url))
     try:
-        table = ReadSnapshot.__table__.to_metadata(MetaData())
+        table = cast(Table, ReadSnapshot.__table__).to_metadata(MetaData())
         table.c.payload_json.type = Integer()
         with engine.begin() as connection:
             table.create(connection)
@@ -169,7 +172,7 @@ def test_read_snapshot_migration_refuses_alien_layout_without_deleting_rows(migr
     run_upgrade(migration_url, revision, bootstrap_legacy=False)
     engine = create_engine(to_sync_database_url(migration_url))
     try:
-        table = ReadSnapshot.__table__.to_metadata(MetaData())
+        table = cast(Table, ReadSnapshot.__table__).to_metadata(MetaData())
         if layout == "default":
             table.c.generation.server_default = DefaultClause(text("999"))
         elif layout == "unique":
@@ -188,7 +191,7 @@ def test_read_snapshot_migration_refuses_alien_layout_without_deleting_rows(migr
             table.c.payload_json.type = Integer()
         with engine.begin() as connection:
             if direction == "downgrade":
-                ReadSnapshot.__table__.drop(connection)
+                cast(Table, ReadSnapshot.__table__).drop(connection)
             table.create(connection)
             connection.execute(
                 text(

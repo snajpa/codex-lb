@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import delete, func, select, update
 
 from app.core.scheduling.leader_election import LeaderElection
+from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import ReadSnapshot, SchedulerLeader
 from app.db.session import SessionLocal
@@ -147,11 +148,13 @@ async def test_expired_and_superseded_producers_cannot_publish(db_setup):
     async with SessionLocal() as session:
         repository = SnapshotRepository(session)
         generation = await repository.claim(key, old)
+        assert generation is not None
         assert generation == 1
         assert await repository.publish(
             key, generation, old, {"value": "last-good"}, interval_seconds=300, duration_ms=1
         )
         abandoned = await repository.claim(key, old)
+        assert abandoned is not None
     async with SessionLocal() as session:
         await session.execute(
             update(SchedulerLeader).where(SchedulerLeader.id == 101).values(expires_at=utcnow() - timedelta(seconds=1))
@@ -165,6 +168,7 @@ async def test_expired_and_superseded_producers_cannot_publish(db_setup):
     async with SessionLocal() as session:
         repository = SnapshotRepository(session)
         generation = await repository.claim(key, new)
+        assert generation is not None
         assert generation > abandoned
         assert await repository.publish(key, generation, new, {"value": "new"}, interval_seconds=300, duration_ms=1)
         assert not await repository.publish(
@@ -202,7 +206,9 @@ async def test_independent_lease_works_with_default_leader_disabled(db_setup, mo
     assert await second.try_acquire()
     assert await second.release()
     async with SessionLocal() as session:
-        assert (await session.get(SchedulerLeader, 1)).leader_id == "older-replica"
+        owner = await session.get(SchedulerLeader, 1)
+        assert owner is not None
+        assert owner.leader_id == "older-replica"
 
 
 @pytest.mark.asyncio
@@ -213,6 +219,7 @@ async def test_cancellation_joins_collector_and_preserves_payload(db_setup, monk
     async with SessionLocal() as session:
         repository = SnapshotRepository(session)
         generation = await repository.claim(key, worker.leader)
+        assert generation is not None
         await repository.publish(key, generation, worker.leader, {"value": "good"}, interval_seconds=0, duration_ms=1)
     entered, left = asyncio.Event(), asyncio.Event()
 
@@ -282,6 +289,7 @@ async def test_stale_report_date_or_scope_is_never_relabelled(db_setup, monkeypa
     async with SessionLocal() as session:
         repository = SnapshotRepository(session)
         generation = await repository.claim(key, worker.leader)
+        assert generation is not None
         await repository.publish(
             key,
             generation,
@@ -342,7 +350,7 @@ async def test_cached_dashboard_identity_is_redacted_per_request_not_in_storage(
     worker = ReadSnapshotScheduler()
     key = await _register()
     assert await worker.leader.try_acquire()
-    payload = {
+    payload: dict[str, JsonValue] = {
         "overviews": {
             "7d": {
                 "accounts": [
@@ -362,15 +370,24 @@ async def test_cached_dashboard_identity_is_redacted_per_request_not_in_storage(
     async with SessionLocal() as session:
         repository = SnapshotRepository(session)
         generation = await repository.claim(key, worker.leader)
+        assert generation is not None
         assert await repository.publish(key, generation, worker.leader, payload, interval_seconds=300, duration_ms=1)
     async with SessionLocal() as session:
         viewer = await SnapshotReader(session).dashboard(timeframe="7d", window=5, redact_identity=True)
-    assert viewer["accounts"][0]["email"] != "private@example.com"
-    assert viewer["accounts"][0]["workspaceId"] is None
+    viewer_accounts = viewer["accounts"]
+    assert isinstance(viewer_accounts, list)
+    viewer_account = viewer_accounts[0]
+    assert isinstance(viewer_account, dict)
+    assert viewer_account["email"] != "private@example.com"
+    assert viewer_account["workspaceId"] is None
     async with SessionLocal() as session:
         owner = await SnapshotReader(session).dashboard(timeframe="7d", window=5)
-    assert owner["accounts"][0]["email"] == "private@example.com"
-    assert owner["accounts"][0]["workspaceId"] == "private-workspace"
+    owner_accounts = owner["accounts"]
+    assert isinstance(owner_accounts, list)
+    owner_account = owner_accounts[0]
+    assert isinstance(owner_account, dict)
+    assert owner_account["email"] == "private@example.com"
+    assert owner_account["workspaceId"] == "private-workspace"
     assert (await _read(key)).payload == payload
     assert await worker.stop()
 
@@ -456,7 +473,9 @@ async def test_lease_loss_cancels_both_owned_lanes(db_setup, monkeypatch):
     finally:
         assert await worker.stop()
     async with SessionLocal() as session:
-        assert (await session.get(SchedulerLeader, 101)).leader_id == "takeover"
+        owner = await session.get(SchedulerLeader, 101)
+        assert owner is not None
+        assert owner.leader_id == "takeover"
         assert (
             await session.execute(
                 select(func.count()).select_from(ReadSnapshot).where(ReadSnapshot.payload_json.is_not(None))
@@ -547,6 +566,7 @@ async def test_mysql_fence_uses_same_session_clock_as_lease(db_setup, monkeypatc
             repository = SnapshotRepository(session)
             key = await repository.register("dashboard", {})
             generation = await repository.claim(key, leader)
+            assert generation is not None
             assert generation == 1  # A negative session offset must not appear expired.
             assert await repository.publish(
                 key, generation, leader, {"value": "good"}, interval_seconds=300, duration_ms=1
@@ -557,7 +577,9 @@ async def test_mysql_fence_uses_same_session_clock_as_lease(db_setup, monkeypatc
             assert not await repository.publish(
                 key, generation, leader, {"value": "late"}, interval_seconds=300, duration_ms=1
             )
-            assert (await repository.read(key, interval_seconds=300)).payload == {"value": "good"}
+            value = await repository.read(key, interval_seconds=300)
+            assert value is not None
+            assert value.payload == {"value": "good"}
     finally:
         await leader.release()
         await isolated.dispose()

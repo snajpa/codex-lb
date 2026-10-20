@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import event, select
 
+from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import ReadSnapshot
 from app.db.session import SessionLocal
@@ -23,7 +24,7 @@ async def _publish_metadata(zones: tuple[str, ...] = ("UTC",)) -> None:
             if zone != "UTC":
                 await repository.register("report-zone", {"timezone": zone})
             for days in (7, 30, 90):
-                parameters = {"days": days, "timezone": zone}
+                parameters: dict[str, JsonValue] = {"days": days, "timezone": zone}
                 key = await repository.register("report-preset", parameters, pinned=zone == "UTC")
                 row = await session.get(ReadSnapshot, key)
                 assert row is not None
