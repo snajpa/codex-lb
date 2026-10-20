@@ -29,9 +29,11 @@ from app.modules.dashboard.schemas import (
     WeeklyPaceWindowMinutes,
 )
 from app.modules.dashboard.spend_projection import build_spend_projection
+from app.modules.dashboard.traffic_pace import build_pace_calibrations
 from app.modules.dashboard.weekly_pace import (
     DEMAND_WINDOW,
     FLEET_BURN_WINDOW,
+    PACE_ELIGIBLE_ACCOUNT_STATUSES,
     WEEKLY_PACE_WINDOWS,
     build_weekly_credit_pace,
 )
@@ -288,6 +290,12 @@ class DashboardService:
             until=now,
         )
         pace_now = utcnow()
+        traffic_calibrations = build_pace_calibrations(
+            secondary_history,
+            eligible_accounts={account.id for account in accounts if account.status in PACE_ELIGIBLE_ACCOUNT_STATUSES},
+            now=pace_now,
+        )
+        traffic_work = await self._repo.traffic_pace_work(traffic_calibrations, now=pace_now)
         weekly_credit_pace_windows = {
             window: build_weekly_credit_pace(
                 accounts=accounts,
@@ -299,6 +307,8 @@ class DashboardService:
                 working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
                 smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
                 burn_window_minutes=window,
+                traffic_calibrations=traffic_calibrations,
+                traffic_work=traffic_work,
             )
             for window in WEEKLY_PACE_WINDOWS
         }

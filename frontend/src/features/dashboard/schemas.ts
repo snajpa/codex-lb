@@ -149,6 +149,12 @@ const WeeklyCreditPaceSchema = z.object({
   projectedDepletionHours: z.number().nullable().optional(),
   projectedMinimumRemainingCredits: z.number().nullable(),
   forecastBurnRateCreditsPerHour: z.number().nullable(),
+  burnRateBasis: z.enum(["quota", "traffic_calibrated"]).optional(),
+  observedQuotaBurnRateCreditsPerHour: z.number().nullable().optional(),
+  burnCalibrationMinutes: z.number().nonnegative().nullable().optional(),
+  burnObservedRequestCount: z.number().int().nonnegative().nullable().optional(),
+  burnUnpricedRequestCount: z.number().int().nonnegative().nullable().optional(),
+  burnCalibrationUnpricedRequestCount: z.number().int().nonnegative().nullable().optional(),
   scheduledBurnRateCreditsPerHour: z.number(),
   // Runway fields (additive; optional so older backends still parse).
   headroomPercent: z.number().optional(),

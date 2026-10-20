@@ -92,6 +92,12 @@ class WeeklyCreditApiKeyAttribution(DashboardModel):
 
 class WeeklyCreditPaceResponse(DashboardModel):
     burn_window_minutes: WeeklyPaceWindowMinutes = 180
+    burn_rate_basis: Literal["quota", "traffic_calibrated"] = "quota"
+    observed_quota_burn_rate_credits_per_hour: float | None = None
+    burn_calibration_minutes: float | None = None
+    burn_observed_request_count: int | None = None
+    burn_unpriced_request_count: int | None = None
+    burn_calibration_unpriced_request_count: int | None = None
     total_full_credits: float
     total_actual_remaining_credits: float
     total_expected_remaining_credits: float

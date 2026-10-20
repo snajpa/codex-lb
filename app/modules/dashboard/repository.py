@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from weakref import WeakValueDictionary
 
 from sqlalchemy import case, func, select, union_all
@@ -20,6 +20,13 @@ from app.db.models import (
     UsageHistory,
 )
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.dashboard.schemas import WeeklyPaceWindowMinutes
+from app.modules.dashboard.traffic_pace import (
+    TRAFFIC_PACE_WINDOWS,
+    PaceCalibration,
+    PaceTrafficWork,
+    TrafficWindowWork,
+)
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -230,6 +237,72 @@ class DashboardRepository:
             )
         )
         return [SpendProjectionInput(*row) for row in result.all()]
+
+    async def traffic_pace_work(
+        self, calibrations: Mapping[str, PaceCalibration], *, now: datetime
+    ) -> dict[str, PaceTrafficWork]:
+        """One time-bounded grouped read, only called by the background collector."""
+        if not calibrations:
+            return {}
+        calibration_start = case(
+            *((RequestLog.account_id == key, value.start) for key, value in calibrations.items()), else_=now
+        )
+        calibration_end = case(
+            *((RequestLog.account_id == key, value.end) for key, value in calibrations.items()), else_=now
+        )
+        calibration_rows = (RequestLog.requested_at >= calibration_start) & (RequestLog.requested_at < calibration_end)
+        work = case((RequestLog.cost_usd > 0, RequestLog.cost_usd), else_=0.0)
+        has_usage = (
+            func.coalesce(RequestLog.input_tokens, 0)
+            + func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        ) > 0
+        known_zero_usage = (
+            (RequestLog.input_tokens == 0)
+            & (RequestLog.output_tokens == 0)
+            & (func.coalesce(RequestLog.reasoning_tokens, 0) == 0)
+        )
+        unpriced = (has_usage | ~func.coalesce(known_zero_usage, False)) & (
+            RequestLog.cost_usd.is_(None) | (RequestLog.cost_usd <= 0)
+        )
+        columns = [
+            RequestLog.account_id,
+            func.sum(case((calibration_rows, work), else_=0.0)).label("calibration_work"),
+            func.sum(case((calibration_rows & unpriced, 1), else_=0)).label("calibration_unpriced"),
+        ]
+        for minutes in TRAFFIC_PACE_WINDOWS:
+            recent = RequestLog.requested_at >= now - timedelta(minutes=minutes)
+            columns.extend(
+                [
+                    func.sum(case((recent, work), else_=0.0)).label(f"w{minutes}_work"),
+                    func.sum(case((recent, 1), else_=0)).label(f"w{minutes}_requests"),
+                    func.sum(case((recent & unpriced, 1), else_=0)).label(f"w{minutes}_unpriced"),
+                ]
+            )
+        statement = (
+            select(*columns)
+            .where(
+                RequestLog.account_id.in_(calibrations),
+                RequestLog.requested_at >= min(value.start for value in calibrations.values()),
+                RequestLog.requested_at < now,
+                RequestLog.deleted_at.is_(None),
+                RequestLogsRepository._exclude_warmup_clause(),
+            )
+            .group_by(RequestLog.account_id)
+        )
+        result: dict[str, PaceTrafficWork] = {}
+        for row in (await self._session.execute(statement)).mappings():
+            windows: dict[WeeklyPaceWindowMinutes, TrafficWindowWork] = {
+                minutes: TrafficWindowWork(
+                    float(row[f"w{minutes}_work"]),
+                    int(row[f"w{minutes}_requests"]),
+                    int(row[f"w{minutes}_unpriced"]),
+                )
+                for minutes in TRAFFIC_PACE_WINDOWS
+            }
+            result[str(row["account_id"])] = PaceTrafficWork(
+                float(row["calibration_work"]), int(row["calibration_unpriced"]), windows
+            )
+        return result
 
     async def top_api_key_attribution_since(
         self,

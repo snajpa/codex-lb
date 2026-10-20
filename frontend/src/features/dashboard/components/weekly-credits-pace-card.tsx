@@ -318,6 +318,25 @@ function RunwayWeeklyCreditsPaceCard({
             )}
             {burnRateLine ? <span className="ml-1.5">{burnRateLine}</span> : null}
           </p>
+          {pace.burnRateBasis === "traffic_calibrated" && pace.burnCalibrationMinutes != null
+            && pace.burnObservedRequestCount != null ? (
+            <p className="mt-1 text-[11px] text-muted-foreground" data-testid="weekly-pace-traffic-estimate">
+              {t("dashboard.weeklyPace.trafficEstimate", {
+                requests: pace.burnObservedRequestCount.toLocaleString(),
+                window: formatDurationHours((pace.burnWindowMinutes ?? 180) / 60, t),
+                calibration: formatDurationHours(pace.burnCalibrationMinutes / 60, t),
+              })}
+            </p>
+          ) : null}
+          {pace.burnRateBasis === "traffic_calibrated" &&
+            ((pace.burnUnpricedRequestCount ?? 0) > 0 || (pace.burnCalibrationUnpricedRequestCount ?? 0) > 0) ? (
+            <p className="mt-1 text-[11px] text-muted-foreground" data-testid="weekly-pace-incomplete-work">
+              {t("dashboard.weeklyPace.incompleteWork", {
+                recent: pace.burnUnpricedRequestCount ?? 0,
+                calibration: pace.burnCalibrationUnpricedRequestCount ?? 0,
+              })}
+            </p>
+          ) : null}
           {saturated ? (
             <p className="mt-1 text-[11px] text-muted-foreground">{t("dashboard.weeklyPace.saturatedFloor")}</p>
           ) : null}

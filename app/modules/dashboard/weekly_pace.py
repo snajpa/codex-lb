@@ -18,6 +18,12 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditRunwayStatus,
     WeeklyPaceWindowMinutes,
 )
+from app.modules.dashboard.traffic_pace import (
+    TRAFFIC_PACE_WINDOWS,
+    PaceCalibration,
+    PaceTrafficWork,
+    traffic_burn_percent_per_hour,
+)
 
 PRO_WEEKLY_CAPACITY_CREDITS = PLAN_CAPACITY_CREDITS_SECONDARY["pro"]
 FLEET_BURN_WINDOW = timedelta(hours=3)
@@ -75,6 +81,8 @@ def build_weekly_credit_pace(
     working_days: set[int] | None = None,
     smoothing_window_minutes: int = 30,
     burn_window_minutes: WeeklyPaceWindowMinutes = 180,
+    traffic_calibrations: Mapping[str, PaceCalibration] | None = None,
+    traffic_work: Mapping[str, PaceTrafficWork] | None = None,
 ) -> WeeklyCreditPaceResponse | None:
     """Build server-side weekly quota pace from active, fresh weekly usage rows.
 
@@ -104,6 +112,12 @@ def build_weekly_credit_pace(
     total_expected_remaining_credits = 0.0
     scheduled_burn_rate_credits_per_hour = 0.0
     forecast_burn_rate_credits_per_hour = 0.0
+    traffic_rate = 0.0
+    calibrated_account_count = 0
+    calibration_minutes: list[float] = []
+    observed_request_count = 0
+    unpriced_request_count = 0
+    calibration_unpriced_count = 0
 
     for summary in account_summaries:
         account = accounts_by_id.get(summary.account_id)
@@ -168,6 +182,20 @@ def build_weekly_credit_pace(
             rate_sample_count += 1
             forecast_burn_rate_credits_per_hour += account_rate
 
+        calibration = (traffic_calibrations or {}).get(summary.account_id)
+        work = (traffic_work or {}).get(summary.account_id)
+        estimated_percent = traffic_burn_percent_per_hour(calibration, work, burn_window_minutes)
+        # No local requests cannot explain positive directly observed external
+        # quota consumption. Keep that direct signal rather than hide it.
+        if estimated_percent is not None and (estimated_percent > 0 or account_rate == 0):
+            assert calibration is not None and work is not None
+            traffic_rate += estimated_percent * full_credits / 100
+            calibrated_account_count += 1
+            calibration_minutes.append((calibration.end - calibration.start).total_seconds() / 60)
+            observed_request_count += work.windows[burn_window_minutes].requests
+            unpriced_request_count += work.windows[burn_window_minutes].unpriced_requests
+            calibration_unpriced_count += work.calibration_unpriced_requests
+
         pace_accounts.append(
             _PaceAccount(
                 account_id=summary.account_id,
@@ -189,7 +217,13 @@ def build_weekly_credit_pace(
     smoothed_delta_percent = smoothed_used_percent - scheduled_used_percent
     smoothed_schedule_gap_credits = max(0.0, total_expected_remaining_credits - total_smoothed_remaining_credits)
 
-    forecast_rate = forecast_burn_rate_credits_per_hour if rate_sample_count == len(pace_accounts) else None
+    observed_quota_rate = forecast_burn_rate_credits_per_hour if rate_sample_count == len(pace_accounts) else None
+    traffic_calibrated = (
+        burn_window_minutes in TRAFFIC_PACE_WINDOWS
+        and calibrated_account_count == len(pace_accounts)
+        and isfinite(traffic_rate)
+    )
+    forecast_rate = traffic_rate if traffic_calibrated else observed_quota_rate
     projection = _project_weekly_pool(pace_accounts, now_ms, forecast_rate)
     projected_shortfall_credits = projection.projected_shortfall_credits
     pace_multiplier = (
@@ -241,6 +275,12 @@ def build_weekly_credit_pace(
 
     return WeeklyCreditPaceResponse(
         burn_window_minutes=burn_window_minutes,
+        burn_rate_basis="traffic_calibrated" if traffic_calibrated else "quota",
+        observed_quota_burn_rate_credits_per_hour=observed_quota_rate,
+        burn_calibration_minutes=min(calibration_minutes) if traffic_calibrated else None,
+        burn_observed_request_count=observed_request_count if traffic_calibrated else None,
+        burn_unpriced_request_count=unpriced_request_count if traffic_calibrated else None,
+        burn_calibration_unpriced_request_count=calibration_unpriced_count if traffic_calibrated else None,
         total_full_credits=total_full_credits,
         total_actual_remaining_credits=total_actual_remaining_credits,
         total_expected_remaining_credits=total_expected_remaining_credits,
@@ -278,7 +318,11 @@ def build_weekly_credit_pace(
         account_count=len(pace_accounts),
         stale_account_count=stale_account_count,
         inactive_account_count=inactive_account_count,
-        confidence=_confidence(len(pace_accounts), rate_sample_count, stale_account_count),
+        confidence=(
+            ("low" if stale_account_count or unpriced_request_count or calibration_unpriced_count else "medium")
+            if traffic_calibrated
+            else _confidence(len(pace_accounts), rate_sample_count, stale_account_count)
+        ),
     )
 
 

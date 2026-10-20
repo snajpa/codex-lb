@@ -30,7 +30,7 @@ KIND_CAPACITY = {"dashboard": 1, "report-zone": 7, "report-preset": 24, "report-
 MAX_PARAMETERS_BYTES = 16 * 1024
 MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 REGISTRY_KEY = "0" * 64
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DASHBOARD_INTERVAL_SECONDS = 300
 REPORT_INTERVAL_SECONDS = 300
 REFRESH_TIMEOUT_SECONDS = 90
@@ -148,23 +148,53 @@ class SnapshotRepository:
         row = await self.session.get(ReadSnapshot, key, with_for_update=True, populate_existing=True)
         if row is None:
             registered = (
-                await self.session.execute(select(ReadSnapshot.snapshot_key, ReadSnapshot.kind).with_for_update())
+                await self.session.execute(
+                    select(ReadSnapshot.snapshot_key, ReadSnapshot.kind, ReadSnapshot.schema_version).with_for_update()
+                )
             ).all()
-            kind_full = sum(item.kind == kind for item in registered) >= KIND_CAPACITY[kind]
+            version = 0 if kind == "report-zone" else SCHEMA_VERSION
+            # A rolling contract upgrade retains the prior replica's exact-key
+            # last-good data. Per-kind admission is versioned, while the global
+            # row bound still includes every version and the shared registry.
+            kind_full = (
+                sum(item.kind == kind and item.schema_version == version for item in registered) >= KIND_CAPACITY[kind]
+            )
             if len(registered) >= MAX_ENTRIES or kind_full:
-                victims = select(ReadSnapshot.snapshot_key).where(
+                idle = (
                     ReadSnapshot.pinned.is_(False),
                     or_(
                         ReadSnapshot.refresh_started_at.is_(None),
                         ReadSnapshot.refresh_started_at < now - timedelta(seconds=REFRESH_TIMEOUT_SECONDS),
                     ),
+                )
+                victim: str | None = None
+                if not kind_full and kind in ("dashboard", "report-preset"):
+                    # Canonical warming must not wait a day behind a full
+                    # previous-contract filter cache. Keep every old pinned
+                    # last-good and every active producer, without widening
+                    # the registry or letting ordinary filters preempt peers.
+                    victim = (
+                        await self.session.execute(
+                            select(ReadSnapshot.snapshot_key)
+                            .where(
+                                *idle,
+                                ReadSnapshot.schema_version > 0,
+                                ReadSnapshot.schema_version < SCHEMA_VERSION,
+                            )
+                            .order_by(ReadSnapshot.requested_at)
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                victims = select(ReadSnapshot.snapshot_key).where(
+                    *idle,
                     ReadSnapshot.requested_at < now - timedelta(days=1),
                 )
                 if kind_full:
-                    victims = victims.where(ReadSnapshot.kind == kind)
-                victim = (
-                    await self.session.execute(victims.order_by(ReadSnapshot.requested_at).limit(1))
-                ).scalar_one_or_none()
+                    victims = victims.where(ReadSnapshot.kind == kind, ReadSnapshot.schema_version == version)
+                if victim is None:
+                    victim = (
+                        await self.session.execute(victims.order_by(ReadSnapshot.requested_at).limit(1))
+                    ).scalar_one_or_none()
                 if victim is None:
                     await self.session.rollback()
                     raise SnapshotCapacityError("Background snapshot queue is full")

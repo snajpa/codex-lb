@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
@@ -34,7 +36,13 @@ def _columns() -> list[sa.Column]:
 def _normalized_default(value: str | None) -> str | None:
     if value is None or value.strip().upper() == "NULL":
         return None
-    value = value.strip().strip("()").strip("'\"").lower()
+    value = value.strip().strip("()").lower()
+    # PostgreSQL reflects BIGINT literal defaults as e.g. '0'::bigint.
+    # Accept only the equivalent constants, never arbitrary cast expressions.
+    cast_literal = re.fullmatch(r"('(?:0|1|false|true)'|0|1|false|true)\s*::\s*(?:bigint|integer|boolean)", value)
+    if cast_literal:
+        value = cast_literal.group(1)
+    value = value.strip("'\"")
     return {"false": "0", "true": "1"}.get(value, value)
 
 
@@ -48,6 +56,8 @@ def _validate_existing(inspector: sa.Inspector, columns: list[sa.Column]) -> boo
     for name, column in expected.items():
         default = None
         if column.server_default is not None:
+            if not isinstance(column.server_default, sa.schema.DefaultClause):
+                raise RuntimeError("Unexpected migration column default")
             argument = column.server_default.arg
             default = (
                 str(argument.compile(dialect=dialect)) if isinstance(argument, sa.sql.ClauseElement) else str(argument)
