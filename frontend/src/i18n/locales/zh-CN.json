@@ -840,9 +840,6 @@
   "dashboard.usage.forecastUnavailable": "无法预测每周积分：{{count}} 个账户的额度未知。上游仅返回百分比，不提供订阅的绝对额度。",
   "dashboard.weeklyPace.burnUnknown": "消耗速率未测量",
   "dashboard.weeklyPace.averagingWindow": "平均时段",
-  "dashboard.weeklyPace.roundingNote": "配额百分比经过取整；百分比不变并不代表没有请求流量。",
-  "dashboard.weeklyPace.trafficEstimate": "根据 {{window}} 内的 {{requests}} 次请求估算，并使用 {{calibration}} 的配额观测进行校准。",
-  "dashboard.weeklyPace.incompleteWork": "低置信度的已计价工作估算；未计价而省略的请求：所选窗口 {{recent}} 个，校准窗口 {{calibration}} 个。其用量未知，并非零。",
   "dashboard.weeklyPace.noObservedBurn": "未观测到配额变化",
   "dashboard.weeklyPace.windowLoading": "正在加载平均值…",
   "dashboard.weeklyPace.windowLoadFailed": "无法刷新平均值。自动刷新将重试。",
@@ -2041,11 +2038,6 @@
   "organisation.automaticAccounts.secret.warning": "请立即复制。它只显示这一次，之后无法再查看；如果丢失，请更换凭据。",
   "organisation.automaticAccounts.secret.copy": "复制凭据",
   "organisation.errors.scim_token_not_found": "该凭据已不存在。",
-  "readSnapshot.warming": "正在后台准备缓存数据…",
-  "readSnapshot.prepared": "生成于 {{time}} · 后台约每 {{minutes}} 分钟刷新",
-  "readSnapshot.delayed": "更新延迟，显示上次完成的快照。",
-  "readSnapshot.refreshing": "正在后台刷新。",
-  "readSnapshot.incompatible": "服务器响应不包含所选平均时间窗口，正在等待兼容的服务器版本。",
-  "readSnapshot.historyStart": "首条保留记录：{{time}}。缺失的历史记录不会被推算补齐。",
-  "readSnapshot.noHistory": "此范围没有匹配的保留请求记录。"
+  "readSnapshot.delayed": "更新延迟",
+  "readSnapshot.incompatible": "服务器响应不包含所选平均时间窗口，正在等待兼容的服务器版本。"
 }

@@ -327,19 +327,12 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         </Button>
       </div>
       <ReadSnapshotStatus snapshot={reportsQuery.data?.snapshot} warming={reportsWarming} />
-      {reportsQuery.data?.observedHistoryStart !== undefined ? (
-        <p className="text-xs text-muted-foreground" data-testid="report-history-boundary">
-          {reportsQuery.data.observedHistoryStart
-            ? t("readSnapshot.historyStart", { time: new Date(reportsQuery.data.observedHistoryStart).toLocaleString() })
-            : t("readSnapshot.noHistory")}
-        </p>
-      ) : null}
       {reportsQuery.data?.speedMetricsAvailable === false ? (
         <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: reportsQuery.data.speedMetricsMaxDays ?? 7 })}</p>
       ) : null}
       {(reportsQuery.isLoading || reportsWarming) && !reportsQuery.data ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
-          {t(reportsWarming ? "readSnapshot.warming" : "common.loading")}
+          {t("common.loading")}
         </div>
       ) : reportsQuery.data ? (
         <>

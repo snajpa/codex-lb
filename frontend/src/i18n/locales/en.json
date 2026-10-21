@@ -840,9 +840,6 @@
   "dashboard.usage.forecastUnavailable": "Weekly credit forecast unavailable: {{count}} account(s) have unknown allowance. Upstream returns percentages but no absolute subscription allowance.",
   "dashboard.weeklyPace.burnUnknown": "Burn not measured",
   "dashboard.weeklyPace.averagingWindow": "Average over",
-  "dashboard.weeklyPace.roundingNote": "Quota percentages are rounded; a flat percentage does not mean there was no traffic.",
-  "dashboard.weeklyPace.trafficEstimate": "Estimate from {{requests}} requests in {{window}}, calibrated against {{calibration}} of quota observations.",
-  "dashboard.weeklyPace.incompleteWork": "Low-confidence priced-work estimate; omitted unpriced requests: {{recent}} in the selected window, {{calibration}} in calibration. Their usage is unknown, not zero.",
   "dashboard.weeklyPace.noObservedBurn": "No quota change observed",
   "dashboard.weeklyPace.windowLoading": "Loading averaging values…",
   "dashboard.weeklyPace.windowLoadFailed": "Could not refresh averaging values. Automatic refresh will retry.",
@@ -2041,11 +2038,6 @@
   "organisation.automaticAccounts.secret.warning": "Copy it now. It is shown once and cannot be read again; if you lose it, replace the credential.",
   "organisation.automaticAccounts.secret.copy": "Copy credential",
   "organisation.errors.scim_token_not_found": "That credential no longer exists.",
-  "readSnapshot.warming": "Preparing cached data in the background…",
-  "readSnapshot.prepared": "Prepared {{time}} · background refresh about every {{minutes}} min",
-  "readSnapshot.delayed": "Update delayed; showing the last completed snapshot.",
-  "readSnapshot.refreshing": "Refreshing in the background.",
-  "readSnapshot.incompatible": "The backend response does not contain the selected averaging window. Waiting for a compatible server generation.",
-  "readSnapshot.historyStart": "First retained observation: {{time}}. Missing history is not reconstructed.",
-  "readSnapshot.noHistory": "No retained request observations match this scope."
+  "readSnapshot.delayed": "Update delayed",
+  "readSnapshot.incompatible": "The backend response does not contain the selected averaging window. Waiting for a compatible server generation."
 }
