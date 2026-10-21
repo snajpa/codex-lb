@@ -4290,7 +4290,7 @@ recommendations together without changing other dashboard timeframes or settings
 - **WHEN** a selected window has no positive burn or insufficient samples
 - **THEN** the card MUST distinguish no observed change from unavailable data
 - **AND** MUST NOT claim a measured safe runway
-- **AND** MUST explain rounded quota percentages make short windows noisy
+- **AND** SHALL NOT add rounded-quota explanatory commentary
 
 #### Scenario: The server cannot measure weekly pace
 - **WHEN** the current overview explicitly reports unavailable pace
@@ -4317,7 +4317,7 @@ recommendations together without changing other dashboard timeframes or settings
 
 ### Requirement: Prepared analytical views distinguish cache state from data coverage
 Dashboard and Reports SHALL consume published background results and display
-freshness without starting measurement on page refresh. Cold preparation,
+a concise delayed-update state only when data is stale or refresh has failed, without starting measurement on page refresh. Normal fresh results SHALL NOT show prepared timestamps, refresh cadence or background-refresh commentary. Detailed freshness and retained-history metadata SHALL remain available in the API without extra UI history paragraphs. Cold preparation,
 refresh failure, actual insufficient observations and unsupported historical
 coverage SHALL be distinct states. Cached data for another window, date range,
 filter or timezone SHALL NOT be relabeled as the requested view.
@@ -4325,7 +4325,7 @@ filter or timezone SHALL NOT be relabeled as the requested view.
 #### Scenario: A report refresh is still running
 - **GIVEN** a complete same-key report snapshot
 - **WHEN** its scheduled refresh is running or has failed
-- **THEN** the page SHALL retain that result and show its age or delayed-update state
+- **THEN** the page SHALL retain that result and show a concise delayed-update state only when stale or failed; a fresh in-progress refresh SHALL remain visually quiet
 
 #### Scenario: An old connection returns an incompatible generation
 - **WHEN** a retained connection returns a response without the selected averaging contract
@@ -4351,19 +4351,19 @@ The dashboard SHALL avoid equating flat rounded quota percentages with the absen
 of observed request work. For five- and fifteen-minute selections it SHALL provide
 a traffic-calibrated estimate when fresh same-account/same-cycle quota changes and
 positive priced request work permit calibration. Any omitted unpriced work SHALL be
-counted separately for the calibration and selected windows, disclosed as incomplete
+counted separately for the calibration and selected windows in the API as incomplete
 request-work coverage, and SHALL lower confidence. Unknown work SHALL NOT be
 coerced into a measured zero. Calibration SHALL use a bounded
 retained history, while the forecast traffic SHALL belong to the selected window.
-The response and existing card SHALL distinguish the estimate from direct quota
-measurement and expose calibration duration and observed request count. Direct
+The response SHALL distinguish the estimate from direct quota
+measurement and expose calibration duration and observed request count. The existing card SHALL retain its approximate numeric formatting without calibration, request-count, omitted-work or rounded-quota explanatory paragraphs. Direct
 quota observations SHALL remain available separately. All rate-dependent runway
 and recommendations SHALL use the same selected rate.
 
 #### Scenario: Heavy five-minute traffic has flat rounded quota counters
 - **GIVEN** fresh flat quota observations in five minutes, substantial priced requests in that interval and a valid positive longer calibration episode for every eligible account
 - **WHEN** the background dashboard snapshot is published and the card selects five minutes
-- **THEN** a positive traffic-calibrated burn estimate SHALL be displayed with its basis and request count
+- **THEN** a positive traffic-calibrated burn estimate SHALL be displayed with approximate numeric formatting; basis and request count SHALL remain API metadata rather than extra UI text
 - **AND** the card SHALL NOT claim that the rounded counters directly measured that burn or substitute fifteen-minute traffic under the five-minute label
 
 #### Scenario: Calibration is incomplete or crosses a reset
@@ -4379,6 +4379,6 @@ and recommendations SHALL use the same selected rate.
 #### Scenario: A disconnected request has no final usage counters
 - **GIVEN** positive priced work supports a same-cycle estimate but some requests have unknown or unpriced work
 - **WHEN** that estimate is displayed
-- **THEN** selected-window and calibration-window omitted counts SHALL be exposed and displayed
-- **AND** confidence SHALL be low, the rate SHALL be labelled an estimate, and omitted work SHALL NOT be presented as zero consumption
+- **THEN** selected-window and calibration-window omitted counts SHALL be exposed in the API without explanatory UI paragraphs
+- **AND** confidence SHALL be low, the card SHALL retain approximate numeric formatting, and omitted work SHALL NOT be presented as zero consumption
 - **AND** an all-unpriced selected window SHALL NOT fabricate a calibrated rate

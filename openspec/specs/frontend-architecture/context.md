@@ -81,8 +81,9 @@ The product-boundary regression renders the real `/dashboard` App route with the
 
 Dashboard and Reports distinguish cache preparation from actual data coverage.
 The page uses exact query identities and shared server generations, keeps usable
-same-key last-good values during refresh, and shows generated-at/stale/failure
-metadata. Changing a window is not a new sample-collection period, and changing
+same-key last-good values during refresh, and exposes detailed generated-at/stale/failure
+metadata through the API. Normal fresh UI stays quiet; only stale or failed refresh
+shows a concise delayed-update state. Changing a window is not a new sample-collection period, and changing
 filters or dates cannot label a prior response as the new result.
 
 For example, the dashboard receives all four averaging choices before the first
@@ -119,8 +120,8 @@ is in [spec.md](./spec.md), including the separate direct-observation contract.
 
 All fresh included accounts need a valid positive calibration episode. Resets,
 percentage corrections, expired resets and stale anchors invalidate the episode.
-Missing usage/cost on cancelled or failed requests is unknown, not free: the card
-shows omitted counts for both intervals and low confidence. An all-unpriced current
+Missing usage/cost on cancelled or failed requests is unknown, not free: API metadata
+records omitted counts for both intervals and low confidence. An all-unpriced current
 window cannot produce a fabricated estimate. One- and three-hour selections retain
 the direct quota calculation; all advice uses the same selected burn rate.
 
@@ -129,6 +130,21 @@ the direct quota calculation; all advice uses the same selected burn rate.
 If an account used ten percent of its quota across ten priced work units, one
 priced work unit in the selected five minutes estimates twelve percent per hour.
 A rounded-flat five-minute counter remains separately visible as a direct zero
-observation. Operators see the estimate basis, selected request count and calibration
-span in the existing runway card. Browser reads remain shared snapshot reads; a
+observation. The API retains the estimate basis, selected request count and calibration
+span; the card keeps approximate numeric formatting without explanatory paragraphs. Browser reads remain shared snapshot reads; a
 new release needs its own API, built-browser and native rollout qualification.
+
+## Minimal analytical presentation
+
+The Dashboard and Reports cleanup removes commentary rather than calculations.
+The averaging buttons, approximate numeric rates, reset-aware runway and existing
+unsupported-history states remain. Detailed freshness, calibration, request counts
+and omitted-work coverage stay in API metadata instead of new paragraphs.
+
+A healthy five-minute estimate therefore shows its existing approximate rate and
+controls without a request-count or calibration explanation. Fresh background
+refreshes do not add status text. Cold loading and delayed updates remain concise
+exceptional states, so removing commentary does not turn an error into success.
+This presentation-only boundary leaves accounting, prices, query identities,
+polling and shared snapshot production unchanged. See the requirements in
+[`spec.md`](./spec.md) for the testable behavior.
