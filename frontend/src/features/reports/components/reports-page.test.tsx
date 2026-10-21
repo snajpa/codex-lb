@@ -206,6 +206,21 @@ describe("ReportsPage", () => {
     );
   });
 
+  it("shows report values without snapshot or retained-history commentary", () => {
+    useReportsMock.mockReturnValue(asUseReportsResult({
+      data: { ...EMPTY_REPORT, observedHistoryStart: "2026-10-01T00:00:00Z", snapshot: {
+        generatedAt: "2026-10-21T00:35:24Z",
+        stale: false, refreshing: true, lastError: null, generation: 2, refreshIntervalSeconds: 300,
+      } },
+      isLoading: false, isError: false, refetch: vi.fn(),
+    }));
+    renderWithProviders(<ReportsPage />);
+    expect(screen.queryByTestId("read-snapshot-status")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("report-history-boundary")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Prepared|background refresh|First retained observation|Missing history is not reconstructed/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+  });
+
   it("shows the loading label without duplicating ellipsis punctuation", () => {
     useReportsMock.mockReturnValue(
       asUseReportsResult({

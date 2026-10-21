@@ -754,7 +754,7 @@ test("prepared report presets and five-minute reload use independently refreshed
   expect(initial.weeklyCreditPaceWindows?.[5]?.burnRateRecentCreditsPerHour).toBeGreaterThan(0);
   const controls = page.getByRole("group", { name: "Average over" });
   await controls.getByRole("button", { name: "5 min", exact: true }).click();
-  await expect(page.getByTestId("read-snapshot-status")).toBeVisible();
+  await expect(page.getByTestId("read-snapshot-status")).toHaveCount(0);
 
   // No report HTTP request preceded these preset reads. The real worker,
   // rather than an endpoint or a test collector call, prepared every bundle.
@@ -798,7 +798,7 @@ test("prepared report presets and five-minute reload use independently refreshed
     await expect(controls.getByRole("button", { name: "5 min", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByText("Loading averaging values…", { exact: true })).toHaveCount(0);
     await expect(page.getByText("not enough recent samples to measure burn", { exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("read-snapshot-status")).toBeVisible();
+    await expect(page.getByTestId("read-snapshot-status")).toHaveCount(0);
     if (screenshotDirectory) await page.screenshot({ path: path.join(screenshotDirectory, "prepared-five-minute-after.png"), fullPage: true });
   } finally {
     observations.kill("SIGTERM");

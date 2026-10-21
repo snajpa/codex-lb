@@ -35,20 +35,19 @@ const BASE_PACE: WeeklyCreditPace = {
 };
 
 describe("WeeklyCreditsPaceCard", () => {
-  it("discloses selected traffic window and distinct quota calibration without claiming a direct measurement", () => {
-    render(<WeeklyCreditsPaceCard burnWindowMinutes={5} pace={{ ...BASE_PACE, burnWindowMinutes: 5,
+  it("keeps calibrated values without unsolicited calibration or coverage commentary", () => {
+    render(<WeeklyCreditsPaceCard burnWindowMinutes={5} onBurnWindowChange={vi.fn()} pace={{ ...BASE_PACE, burnWindowMinutes: 5,
       runwayStatus: "runs_dry", headroomPercent: 30, headroomCredits: 500000,
       burnRateRecentCreditsPerHour: 12000, depletionEtaHours: 8,
       burnRateBasis: "traffic_calibrated", observedQuotaBurnRateCreditsPerHour: 0,
       burnCalibrationMinutes: 120, burnObservedRequestCount: 465, confidence: "low",
       burnUnpricedRequestCount: 1, burnCalibrationUnpricedRequestCount: 2,
     }} />);
-    const label = screen.getByTestId("weekly-pace-traffic-estimate");
-    expect(label).toHaveTextContent("465 requests");
-    expect(label).toHaveTextContent("5m");
-    expect(label).toHaveTextContent("2h of quota observations");
-    expect(label).toHaveTextContent("Estimate");
-    expect(screen.getByTestId("weekly-pace-incomplete-work")).toHaveTextContent("Their usage is unknown, not zero");
+    expect(screen.queryByTestId("weekly-pace-traffic-estimate")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("weekly-pace-incomplete-work")).not.toBeInTheDocument();
+    expect(screen.queryByText(/calibrated against|omitted unpriced|unknown, not zero|Quota percentages are rounded/)).not.toBeInTheDocument();
+    expect(screen.getByText(/at ~12K\/h/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "5 min" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("does not invent calibration metadata for a direct quota rate", () => {
@@ -509,7 +508,7 @@ describe("weekly pace averaging controls", () => {
     expect(screen.getByRole("button", { name: "5 min" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByText("50%")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Loading averaging values");
-    expect(screen.getByText(/Quota percentages are rounded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Quota percentages are rounded/)).not.toBeInTheDocument();
   });
 
   it("keeps controls and reports failure without old-window values", () => {
